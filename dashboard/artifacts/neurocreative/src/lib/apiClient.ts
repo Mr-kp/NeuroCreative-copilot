@@ -10,7 +10,6 @@ export async function analyzeCreatives(
   const res = await fetch(`${API_BASE}/analyze-creatives-upload`, {
     method: "POST",
     body: formData,
-    // No Content-Type header — browser sets multipart boundary automatically
   });
 
   if (!res.ok) {
@@ -18,7 +17,14 @@ export async function analyzeCreatives(
     throw new Error(body.error || `Server returned ${res.status}`);
   }
 
-  return res.json();
+  const data = await res.json();
+
+  if (data.pipeline_log && Array.isArray(data.pipeline_log)) {
+    console.log("[pipeline]", data.pipeline_log.join("\n"));
+    delete data.pipeline_log;
+  }
+
+  return data as DashboardResponse;
 }
 
 // ─── Ask Copilot ───────────────────────────────────────────────────────────

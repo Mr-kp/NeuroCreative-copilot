@@ -2,6 +2,74 @@
 
 All notable changes to NeuroCreative Copilot are documented in this file.
 
+---
+
+## [2026-04-25] - Live Pipeline Integration: Upload Smadex CSVs → Run Analysis
+
+### Summary
+
+The upload endpoint now runs the full creative intelligence pipeline live when you upload raw Smadex CSV files. Previously it only matched creative_ids against pre-computed data. Now it auto-detects which tables you uploaded, joins them, extracts brain features, fits decay curves, trains ML predictions, and generates recommendations — all in one request. Falls back gracefully: scipy for decay curves (or linear heuristic), lightgbm for predictions (or rule-based heuristic), and always matches against pre-computed data if available.
+
+### Added
+
+- **`pipeline_runner.py`** — Self-contained pipeline module with 8 functions:
+  - `detect_tables()` — Auto-detects Smadex table types from uploaded CSVs (filename match or column signature match)
+  - `build_master_table()` — Joins creative_summary + creatives + campaigns + advertisers into one master table
+  - `build_daily_table()` — Aggregates daily stats into creative x date level with CTR/CVR/ROAS
+  - `compute_brain_features()` — Brain-inspired scores from visual metadata (pure pandas/numpy, always works)
+  - `compute_decay_features()` — Scipy curve_fit for exponential decay, falls back to linear heuristic
+  - `compute_predictions_ml()` — LightGBM classifier + regressor, falls back to rule-based heuristics
+  - `generate_recommendations()` — Scale/Monitor/Pivot/Pause with natural language explanations
+  - `run_pipeline()` — Orchestrates everything, returns merged DataFrame + pipeline log
+
+### Changed
+
+- **`api_server.py`** — Upload endpoint now accepts multiple CSV files via `files` field:
+  - Auto-detects table types and runs live pipeline if multiple Smadex CSVs uploaded
+  - Falls back to pre-computed data matching if a single CSV with creative_ids is uploaded
+  - Returns `pipeline_log` field in response showing which steps ran
+  - Pre-computed data still loaded at startup as fallback
+- **`dashboard/artifacts/neurocreative/src/components/UploadCampaignData.tsx`** — Multi-file CSV upload:
+  - Accepts multiple CSV files (drag & drop or file picker)
+  - Shows list of uploaded files with sizes
+  - Expandable hint showing supported Smadex table names
+  - "Add more" / "Clear all" buttons
+- **`dashboard/artifacts/neurocreative/src/lib/apiClient.ts`** — Sends multiple files, logs pipeline output
+
+### How It Works
+
+```
+User uploads CSVs
+       |
+       v
+api_server.py receives files[]
+       |
+       +-- Single CSV with creative_ids?
+       |       -> Match against pre-computed data (fast)
+       |
+       +-- Multiple Smadex CSVs?
+               -> pipeline_runner.run_pipeline()
+                    1. detect_tables()      -> identify each CSV
+                    2. build_master_table()  -> join into 1 row/creative
+                    3. build_daily_table()   -> aggregate time-series
+                    4. compute_brain_features() -> attention/reward/memory/emotion/visual_load
+                    5. compute_decay_features()  -> CTR decay curves (scipy or heuristic)
+                    6. compute_predictions_ml()   -> LightGBM or heuristic
+                    7. generate_recommendations() -> Scale/Monitor/Pivot/Pause + explanations
+                    8. Return merged DataFrame -> build_creative_row() -> DashboardResponse
+```
+
+### Dependencies (Optional, with Fallbacks)
+
+| Package | Used For | Fallback if Missing |
+|---------|----------|-------------------|
+| `pandas`, `numpy` | All data processing | **Required** (hard dependency) |
+| `scipy` | Decay curve fitting (`curve_fit`) | Linear decay heuristic |
+| `scikit-learn` | LabelEncoder, GroupShuffleSplit | Rule-based predictions |
+| `lightgbm` | Status classifier + fatigue regressor | Rule-based heuristics |
+
+---
+
 ## [2026-04-25] - Integration: Python API Backend + SSE Streaming Copilot
 
 ### Summary

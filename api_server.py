@@ -5,6 +5,7 @@ import re
 import time
 import asyncio
 from pathlib import Path
+from collections import Counter
 
 import pandas as pd
 import numpy as np
@@ -28,19 +29,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Loading pipeline data...")
-master = pd.read_csv(DATA_DIR / "master_creatives.csv")
-model_outputs = pd.read_csv(DATA_DIR / "model_outputs.csv")
-brain_features = pd.read_csv(DATA_DIR / "brain_features.csv")
-daily = pd.read_csv(DATA_DIR / "daily_fatigue_table.csv")
+PRELOADED = {}
+if (DATA_DIR / "master_creatives.csv").exists():
+    print("Loading pre-computed pipeline data...")
+    PRELOADED["master"] = pd.read_csv(DATA_DIR / "master_creatives.csv")
+    PRELOADED["model_outputs"] = pd.read_csv(DATA_DIR / "model_outputs.csv")
+    PRELOADED["brain_features"] = pd.read_csv(DATA_DIR / "brain_features.csv")
+    PRELOADED["daily"] = pd.read_csv(DATA_DIR / "daily_fatigue_table.csv")
 
-merged = master.merge(model_outputs, on="creative_id", how="left")
-merged = merged.merge(brain_features, on="creative_id", how="left")
-merged["fatigue_probability"] = merged["fatigue_probability"].fillna(0)
-merged["recommendation"] = merged["recommendation"].fillna("Monitor")
-merged["explanation"] = merged["explanation"].fillna("Performance within normal range.")
-merged["predicted_status"] = merged["predicted_status"].fillna("stable")
-print(f"Loaded {len(merged)} creatives with pipeline data.")
+    _merged = PRELOADED["master"].merge(PRELOADED["model_outputs"], on="creative_id", how="left")
+    _merged = _merged.merge(PRELOADED["brain_features"], on="creative_id", how="left")
+    _merged["fatigue_probability"] = _merged["fatigue_probability"].fillna(0)
+    _merged["recommendation"] = _merged["recommendation"].fillna("Monitor")
+    _merged["explanation"] = _merged["explanation"].fillna("Performance within normal range.")
+    _merged["predicted_status"] = _merged["predicted_status"].fillna("stable")
+    PRELOADED["merged"] = _merged
+    print(f"Loaded {len(_merged)} pre-computed creatives.")
+else:
+    print("No pre-computed data found. Pipeline will run on upload.")
+
+LAST_PIPELINE_RESULT = None
 
 STATUS_MAP = {
     "top_performer": "Top Performer",
@@ -58,8 +66,8 @@ ACTION_MAP = {
 }
 
 
-def build_creative_row(row) -> dict:
-    cid = str(int(row["creative_id"]))
+def build_creative_row(row, daily_df: pd.DataFrame = None) -> dict:
+    cid = str(int(row["creative_id"])) if pd.notna(row.get("creative_id")) else "0"
 
     asset_file = row.get("asset_file", "")
     if pd.notna(asset_file):
@@ -71,8 +79,6 @@ def build_creative_row(row) -> dict:
     fmt_lower = fmt.lower()
     if fmt_lower in ("rewarded_video", "interstitial", "video"):
         asset_type = "video"
-    elif fmt_lower == "banner":
-        asset_type = "image"
     else:
         asset_type = "image"
 
@@ -133,10 +139,6 @@ def build_creative_row(row) -> dict:
 
     explanation_clean = explanation.encode("utf-8", errors="replace").decode("utf-8")
 
-    headline = str(row.get("headline", "")) if pd.notna(row.get("headline")) else ""
-    subhead = str(row.get("subhead", "")) if pd.notna(row.get("subhead")) else ""
-    cta = str(row.get("cta_text", "")) if pd.notna(row.get("cta_text")) else ""
-
     vert = str(row.get("vertical", "")) if pd.notna(row.get("vertical")) else ""
     fmt_disp = str(row.get("format", "")) if pd.notna(row.get("format")) else ""
 
@@ -156,28 +158,31 @@ def build_creative_row(row) -> dict:
     copilot_os = f"Performance is consistent across platforms for this {vert} campaign."
     copilot_summary = f"Creative {cid} is {status} with ROAS {roas:.2f}x, CTR {ctr:.4f}, and fatigue probability {fp:.0%}. Recommendation: {action}."
 
-    creative_daily = daily[daily["creative_id"] == int(cid)].sort_values("date")
     annotations = []
-    if len(creative_daily) > 14:
-        peak_idx = creative_daily["ctr"].idxmax()
-        peak_row = creative_daily.loc[peak_idx]
-        annotations.append({
-            "day": str(peak_row["date"]),
-            "label": "Peak CTR",
-            "reason": f"CTR peaked at {float(peak_row['ctr']) * 100:.2f}%"
-        })
-        tail = creative_daily.tail(7)
-        if len(tail) >= 7:
-            tail_ctr = tail["ctr"].mean()
-            head = creative_daily.head(7)
-            head_ctr = head["ctr"].mean()
-            if head_ctr > 0 and (tail_ctr / head_ctr) < 0.5:
-                last_date = str(tail.iloc[-1]["date"])
-                annotations.append({
-                    "day": last_date,
-                    "label": "Fatigue onset",
-                    "reason": f"CTR dropped {(1 - tail_ctr / head_ctr) * 100:.0f}% from initial levels"
-                })
+    if daily_df is not None and not daily_df.empty and "creative_id" in daily_df.columns:
+        creative_daily = daily_df[daily_df["creative_id"] == int(cid)].sort_values("date") if cid.isdigit() else pd.DataFrame()
+        if len(creative_daily) > 14:
+            peak_idx = creative_daily["ctr"].idxmax()
+            peak_row = creative_daily.loc[peak_idx]
+            annotations.append({
+                "day": str(peak_row["date"]),
+                "label": "Peak CTR",
+                "reason": f"CTR peaked at {float(peak_row['ctr']) * 100:.2f}%"
+            })
+            tail = creative_daily.tail(7)
+            if len(tail) >= 7:
+                tail_ctr = tail["ctr"].mean()
+                head = creative_daily.head(7)
+                head_ctr = head["ctr"].mean()
+                if head_ctr > 0 and (tail_ctr / head_ctr) < 0.5:
+                    last_date = str(tail.iloc[-1]["date"])
+                    annotations.append({
+                        "day": last_date,
+                        "label": "Fatigue onset",
+                        "reason": f"CTR dropped {(1 - tail_ctr / head_ctr) * 100:.0f}% from initial levels"
+                    })
+
+    perf_score_val = float(row.get("perf_score", 0.5)) if pd.notna(row.get("perf_score")) else 0.5
 
     return {
         "creative_id": cid,
@@ -188,7 +193,7 @@ def build_creative_row(row) -> dict:
         "status": status,
         "recommended_action": action,
         "confidence": round(min(0.95, max(0.4, abs(fp - 0.5) * 2 + 0.5)), 2),
-        "creative_health_score": round(float(row.get("perf_score", 0.5)) * 100) if pd.notna(row.get("perf_score")) else 50,
+        "creative_health_score": round(perf_score_val * 100),
         "fatigue_risk": round(fp * 100),
         "rank": 0,
         "ctr": round(ctr, 6),
@@ -254,42 +259,18 @@ def build_dashboard_summary(filtered_df: pd.DataFrame) -> dict:
     }
 
 
-@app.post("/api/analyze-creatives-upload")
-async def analyze_upload(csvFile: UploadFile = File(...)):
-    print(f"[analyze] Received: {csvFile.filename}")
-    content = await csvFile.read()
-
-    try:
-        uploaded = pd.read_csv(io.BytesIO(content))
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Cannot parse CSV: {e}"})
-
-    print(f"[analyze] Parsed {len(uploaded)} rows from upload")
-
-    id_col = None
-    for col in ["creative_id", "Creative_ID", "id", "ID"]:
-        if col in uploaded.columns:
-            id_col = col
-            break
-
-    if id_col and id_col in uploaded.columns:
-        uploaded_ids = set(uploaded[id_col].astype(int).tolist())
-        filtered = merged[merged["creative_id"].isin(uploaded_ids)].copy()
-        if len(filtered) == 0:
-            filtered = merged.head(len(uploaded)).copy()
-    else:
-        filtered = merged.head(min(len(uploaded), 1080)).copy()
-
-    print(f"[analyze] Matched {len(filtered)} creatives from pipeline")
+def _build_response_from_merged(merged_df: pd.DataFrame, daily_df: pd.DataFrame = None) -> dict:
+    """Build the DashboardResponse JSON from a merged DataFrame."""
+    if daily_df is None:
+        daily_df = PRELOADED.get("daily", pd.DataFrame())
 
     creatives = []
-    for idx, (_, row) in enumerate(filtered.iterrows()):
-        ac = build_creative_row(row)
+    for idx, (_, row) in enumerate(merged_df.iterrows()):
+        ac = build_creative_row(row, daily_df)
         ac["rank"] = idx + 1
         creatives.append(ac)
 
     top_actions = [c["recommended_action"] for c in creatives]
-    from collections import Counter
     action_counts = Counter(top_actions)
 
     recs = []
@@ -302,14 +283,101 @@ async def analyze_upload(csvFile: UploadFile = File(...)):
     if not recs:
         recs.append("Portfolio is stable. Monitor for emerging fatigue signals.")
 
-    response = {
-        "dashboard_summary": build_dashboard_summary(filtered),
+    return {
+        "dashboard_summary": build_dashboard_summary(merged_df),
         "creatives": creatives,
         "portfolio_recommendations": recs,
     }
 
-    print(f"[analyze] Returning {len(creatives)} creatives")
-    return JSONResponse(content=response)
+
+@app.post("/api/analyze-creatives-upload")
+async def analyze_upload(files: list[UploadFile] = File(...)):
+    """
+    Accept one or more CSV files. The endpoint auto-detects:
+    - Single CSV with creative_id column → match against pre-computed data
+    - Multiple Smadex CSVs → run the full live pipeline
+    - Any CSV → detect table type and process accordingly
+    """
+    global LAST_PIPELINE_RESULT
+
+    file_data = {}
+    filenames = []
+    for f in files:
+        content = await f.read()
+        filenames.append(f.filename)
+        try:
+            df = pd.read_csv(io.BytesIO(content))
+            file_data[f.filename] = df
+            print(f"[upload] Parsed {f.filename}: {len(df)} rows, {len(df.columns)} columns")
+        except Exception as e:
+            print(f"[upload] Failed to parse {f.filename}: {e}")
+
+    if not file_data:
+        return JSONResponse(status_code=400, content={"error": "No valid CSV files provided."})
+
+    print(f"[upload] Received {len(file_data)} file(s): {filenames}")
+
+    if len(file_data) == 1:
+        fname, uploaded = next(iter(file_data.items()))
+
+        id_col = None
+        for col in ["creative_id", "Creative_ID", "id", "ID"]:
+            if col in uploaded.columns:
+                id_col = col
+                break
+
+        has_pipeline_cols = any(c in uploaded.columns for c in [
+            "motion_score", "text_density", "overall_ctr", "creative_status",
+            "fatigue_day", "brand_visibility_score",
+        ])
+
+        if id_col and "merged" in PRELOADED:
+            uploaded_ids = set(uploaded[id_col].dropna().astype(int).tolist())
+            preloaded_ids = set(PRELOADED["merged"]["creative_id"].dropna().astype(int).tolist())
+            overlap = uploaded_ids & preloaded_ids
+
+            if len(overlap) > 0 and len(overlap) >= len(uploaded_ids) * 0.5:
+                filtered = PRELOADED["merged"][PRELOADED["merged"]["creative_id"].isin(uploaded_ids)].copy()
+                print(f"[upload] Matched {len(filtered)} creatives from pre-computed data ({len(overlap)} IDs overlap)")
+                result = _build_response_from_merged(filtered, PRELOADED.get("daily"))
+                result["pipeline_log"] = [f"Matched {len(filtered)} creatives from pre-computed pipeline data."]
+                return JSONResponse(content=result)
+
+        if has_pipeline_cols and not PRELOADED.get("merged") is not None:
+            pass
+
+    from pipeline_runner import run_pipeline
+
+    print(f"[upload] Running live pipeline on {len(file_data)} uploaded file(s)...")
+    t0 = time.time()
+    result = run_pipeline(file_data)
+    elapsed = time.time() - t0
+
+    print(f"[upload] Pipeline completed in {elapsed:.1f}s")
+    for line in result["log"]:
+        print(f"  {line}")
+
+    LAST_PIPELINE_RESULT = result
+
+    merged = result["merged"]
+    if merged.empty:
+        if "merged" in PRELOADED:
+            print("[upload] Pipeline produced empty result, falling back to pre-computed data")
+            resp = _build_response_from_merged(PRELOADED["merged"].head(len(uploaded) if len(file_data) == 1 else 100), PRELOADED.get("daily"))
+            resp["pipeline_log"] = result["log"]
+            return JSONResponse(content=resp)
+        return JSONResponse(status_code=400, content={
+            "error": "Pipeline produced no results. Upload Smadex CSVs (creative_summary.csv, creatives.csv, etc.) or a CSV with creative_id.",
+        })
+
+    daily_df = result.get("daily", pd.DataFrame())
+    if daily_df.empty:
+        daily_df = PRELOADED.get("daily", pd.DataFrame())
+
+    resp = _build_response_from_merged(merged, daily_df)
+    resp["pipeline_log"] = result["log"]
+    print(f"[upload] Returning {len(resp['creatives'])} creatives")
+    return JSONResponse(content=resp)
 
 
 @app.post("/api/ask-copilot")
@@ -341,7 +409,7 @@ async def ask_copilot(request_body: dict = None):
     elif "change" in q_lower or "improve" in q_lower or "next" in q_lower or "test" in q_lower:
         answer = copilot_pre.get("what_to_change", creative.get("next_best_test", "Consider refreshing the visual concept."))
     elif "brain" in q_lower or "mri" in q_lower or "cognit" in q_lower or "neural" in q_lower:
-        answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}. These are predicted cognitive response patterns derived from visual features — not real neural measurements."
+        answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}. These are predicted cognitive response patterns derived from visual features."
     else:
         answer = copilot_pre.get("summary", f"Creative {cid} is {status} with recommended action: {action}. {explanation}")
 

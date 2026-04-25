@@ -11,6 +11,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Sparkles,
+  Info,
 } from "lucide-react";
 import { analyzeCreatives } from "@/lib/apiClient";
 import type { DashboardResponse } from "@/types/dashboard";
@@ -25,39 +26,67 @@ interface UploadCampaignDataProps {
 const ACCEPTED_ASSETS = ".png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.webm";
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+const SMADEX_TABLE_HINTS = [
+  { name: "creative_summary.csv", desc: "KPIs per creative (required)" },
+  { name: "creatives.csv", desc: "Visual features per creative" },
+  { name: "campaigns.csv", desc: "Campaign metadata" },
+  { name: "advertisers.csv", desc: "Advertiser info" },
+  { name: "creative_daily_country_os_stats.csv", desc: "Daily time-series (for decay analysis)" },
+];
+
 export function UploadCampaignData({
   onAnalysisComplete,
   onAnalysisError,
   isUploading,
   setIsUploading,
 }: UploadCampaignDataProps) {
-  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvFiles, setCsvFiles] = useState<File[]>([]);
   const [creativeFiles, setCreativeFiles] = useState<File[]>([]);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [showHints, setShowHints] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const assetsInputRef = useRef<HTMLInputElement>(null);
 
-  // ── CSV handling ──────────────────────────────────────────────────────
+  // ── CSV handling (multi-file) ────────────────────────────────────────
 
   const handleCsvSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      if (!file.name.toLowerCase().endsWith(".csv")) {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+
+      const csvOnly = files.filter((f) =>
+        f.name.toLowerCase().endsWith(".csv")
+      );
+      if (csvOnly.length === 0) {
         setCsvError("Only .csv files are accepted.");
-        setCsvFile(null);
         return;
       }
-      setCsvError(null);
-      setCsvFile(file);
+      if (csvOnly.length < files.length) {
+        setCsvError(
+          `Skipped ${files.length - csvOnly.length} non-CSV file(s).`
+        );
+      } else {
+        setCsvError(null);
+      }
+      setCsvFiles((prev) => {
+        const existing = new Set(prev.map((f) => f.name));
+        const newFiles = csvOnly.filter((f) => !existing.has(f.name));
+        return [...prev, ...newFiles];
+      });
       setUploadSuccess(false);
     },
     []
   );
 
-  const removeCsv = () => {
-    setCsvFile(null);
+  const removeCsv = (index: number) => {
+    setCsvFiles((prev) => prev.filter((_, i) => i !== index));
+    setCsvError(null);
+    setUploadSuccess(false);
+  };
+
+  const clearAllCsvs = () => {
+    setCsvFiles([]);
     setCsvError(null);
     setUploadSuccess(false);
     if (csvInputRef.current) csvInputRef.current.value = "";
@@ -81,13 +110,15 @@ export function UploadCampaignData({
   // ── Submit ────────────────────────────────────────────────────────────
 
   const handleAnalyze = async () => {
-    if (!csvFile || isUploading) return;
+    if (csvFiles.length === 0 || isUploading) return;
     setIsUploading(true);
     setUploadSuccess(false);
 
     try {
       const formData = new FormData();
-      formData.append("csvFile", csvFile);
+      for (const file of csvFiles) {
+        formData.append("files", file);
+      }
       for (const file of creativeFiles) {
         formData.append("creativeAssets", file);
       }
@@ -112,14 +143,20 @@ export function UploadCampaignData({
   const handleCsvDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setCsvDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv")) {
+    const files = Array.from(e.dataTransfer.files);
+    const csvOnly = files.filter((f) =>
+      f.name.toLowerCase().endsWith(".csv")
+    );
+    if (csvOnly.length === 0) {
       setCsvError("Only .csv files are accepted.");
       return;
     }
     setCsvError(null);
-    setCsvFile(file);
+    setCsvFiles((prev) => {
+      const existing = new Set(prev.map((f) => f.name));
+      const newFiles = csvOnly.filter((f) => !existing.has(f.name));
+      return [...prev, ...newFiles];
+    });
     setUploadSuccess(false);
   }, []);
 
@@ -146,17 +183,17 @@ export function UploadCampaignData({
         </h2>
       </div>
       <p className="text-[11px] text-muted-foreground mb-5 max-w-lg">
-        Upload CSV performance data and matching ad creatives to generate
-        AI-powered creative intelligence.
+        Upload Smadex CSV files for live pipeline analysis, or a single
+        performance CSV to match against pre-computed data.
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* ── CSV Upload ─────────────────────────────────────────────── */}
+        {/* ── CSV Upload (multi-file) ─────────────────────────────────── */}
         <div
           className={`relative rounded-xl border-2 border-dashed transition-colors p-5 ${
             csvDragOver
               ? "border-primary/60 bg-primary/5"
-              : csvFile
+              : csvFiles.length > 0
               ? "border-emerald-500/40 bg-emerald-500/5"
               : csvError
               ? "border-rose-500/40 bg-rose-500/5"
@@ -174,29 +211,61 @@ export function UploadCampaignData({
               <FileSpreadsheet className="h-4.5 w-4.5" />
             </div>
             <div className="text-xs font-semibold mb-1">
-              Upload performance CSV
+              Upload CSV files
             </div>
-            <p className="text-[10px] text-muted-foreground leading-relaxed mb-3 max-w-xs mx-auto">
-              Include creative_id, impressions, clicks, spend, revenue, CTR,
-              CVR, ROAS, and asset_path if available.
+            <p className="text-[10px] text-muted-foreground leading-relaxed mb-2 max-w-xs mx-auto">
+              Drag & drop or select multiple Smadex CSVs. The pipeline
+              auto-detects table types and runs brain feature extraction,
+              decay analysis, ML predictions, and recommendations.
             </p>
 
-            {csvFile ? (
-              <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                <span className="font-mono-tight text-foreground truncate max-w-[200px]">
-                  {csvFile.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={removeCsv}
-                  className="text-muted-foreground hover:text-foreground transition"
-                  aria-label="Remove CSV"
-                >
-                  <X className="h-3 w-3" />
-                </button>
+            <button
+              onClick={() => setShowHints(!showHints)}
+              className="inline-flex items-center gap-1 text-[10px] text-primary/70 hover:text-primary mb-3 transition"
+            >
+              <Info className="h-3 w-3" />
+              {showHints ? "Hide" : "Show"} supported files
+            </button>
+
+            {showHints && (
+              <div className="text-left text-[9px] text-muted-foreground bg-muted/30 rounded-lg p-2 mb-3 max-w-xs mx-auto space-y-1">
+                {SMADEX_TABLE_HINTS.map((h) => (
+                  <div key={h.name} className="flex gap-1">
+                    <span className="font-mono text-foreground/70">{h.name}</span>
+                    <span>— {h.desc}</span>
+                  </div>
+                ))}
               </div>
-            ) : (
+            )}
+
+            {csvFiles.length > 0 && (
+              <div className="space-y-1 mb-3 max-h-32 overflow-y-auto">
+                {csvFiles.map((file, i) => (
+                  <div
+                    key={`${file.name}-${i}`}
+                    className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs w-full"
+                  >
+                    <CheckCircle2 className="h-3 w-3 text-emerald-500 shrink-0" />
+                    <span className="font-mono-tight text-foreground truncate flex-1">
+                      {file.name}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground shrink-0">
+                      {(file.size / 1024).toFixed(0)}KB
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeCsv(i)}
+                      className="text-muted-foreground hover:text-foreground transition shrink-0"
+                      aria-label={`Remove ${file.name}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 justify-center">
               <Button
                 variant="outline"
                 size="sm"
@@ -204,14 +273,25 @@ export function UploadCampaignData({
                 onClick={() => csvInputRef.current?.click()}
               >
                 <Upload className="h-3 w-3" />
-                Choose .csv file
+                {csvFiles.length > 0 ? "Add more" : "Choose .csv files"}
               </Button>
-            )}
+              {csvFiles.length > 1 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs rounded-full px-3 text-muted-foreground"
+                  onClick={clearAllCsvs}
+                >
+                  Clear all
+                </Button>
+              )}
+            </div>
 
             <input
               ref={csvInputRef}
               type="file"
               accept=".csv"
+              multiple
               className="hidden"
               onChange={handleCsvSelect}
             />
@@ -220,6 +300,14 @@ export function UploadCampaignData({
               <div className="mt-2 flex items-center gap-1.5 text-[11px] text-rose-500 justify-center">
                 <AlertCircle className="h-3 w-3" />
                 {csvError}
+              </div>
+            )}
+
+            {csvFiles.length > 0 && (
+              <div className="mt-2 text-[10px] text-muted-foreground">
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0 font-normal">
+                  {csvFiles.length} file{csvFiles.length !== 1 ? "s" : ""} selected
+                </Badge>
               </div>
             )}
           </div>
@@ -335,14 +423,14 @@ export function UploadCampaignData({
 
         <Button
           onClick={handleAnalyze}
-          disabled={!csvFile || isUploading}
+          disabled={csvFiles.length === 0 || isUploading}
           className="h-9 gap-2 rounded-full px-5 text-xs font-semibold"
           data-testid="analyze-button"
         >
           {isUploading ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Analyzing creatives…
+              Running pipeline…
             </>
           ) : (
             <>
