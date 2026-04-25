@@ -342,12 +342,12 @@ export function UploadCampaignData({
           {isUploading ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Analyzing with OpenAI…
+              Analyzing creatives…
             </>
           ) : (
             <>
               <Sparkles className="h-3.5 w-3.5" />
-              Analyze with OpenAI
+              Analyze creatives
             </>
           )}
         </Button>

@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Send, MessageSquare, User, Sparkles, Loader2, AlertCircle } from "lucide-react";
 import type { Creative } from "@/data/smadexData";
 import type { AnalyzedCreative, DashboardSummary, CopilotApiResponse } from "@/types/dashboard";
-import { askCopilot } from "@/lib/apiClient";
+import { askCopilotStream } from "@/lib/apiClient";
 
 interface CopilotSheetProps {
   open: boolean;
@@ -159,8 +159,15 @@ export function CopilotSheet({
     // ── Live API mode (uploaded analysis) ─────────────────────────────
     if (isLiveMode && analyzedCreative) {
       setIsThinking(true);
-      try {
-        const response: CopilotApiResponse = await askCopilot({
+      const thinkingMsg: ChatMessage = {
+        role: "assistant",
+        text: "",
+        timestamp: Date.now(),
+      };
+      addMessage(thinkingMsg);
+
+      await askCopilotStream(
+        {
           question: question.trim(),
           selectedCreative: analyzedCreative,
           dashboardContext: dashboardContext
@@ -169,31 +176,53 @@ export function CopilotSheet({
                 portfolio_recommendations: dashboardContext.portfolio_recommendations,
               }
             : undefined,
-        });
-
-        const botMsg: ChatMessage = {
-          role: "assistant",
-          text: response.answer,
-          timestamp: Date.now(),
-          suggestedAction: response.suggested_action,
-          confidence: response.confidence,
-          supportingPoints: response.supporting_points,
-          followUpQuestions: response.follow_up_questions,
-        };
-        addMessage(botMsg);
-      } catch (err: unknown) {
-        const errorMsg =
-          err instanceof Error ? err.message : "Copilot failed to respond.";
-        const botMsg: ChatMessage = {
-          role: "assistant",
-          text: `Copilot failed to respond. ${errorMsg}. Try again.`,
-          timestamp: Date.now(),
-          isError: true,
-        };
-        addMessage(botMsg);
-      } finally {
-        setIsThinking(false);
-      }
+        },
+        {
+          onToken: (text) => {
+            setMessagesByCreative((prev) => {
+              const msgs = [...(prev[creativeId] || [])];
+              const last = msgs[msgs.length - 1];
+              if (last && last.role === "assistant") {
+                msgs[msgs.length - 1] = { ...last, text: last.text + text };
+              }
+              return { ...prev, [creativeId]: msgs };
+            });
+          },
+          onDone: (response) => {
+            setMessagesByCreative((prev) => {
+              const msgs = [...(prev[creativeId] || [])];
+              const last = msgs[msgs.length - 1];
+              if (last && last.role === "assistant") {
+                msgs[msgs.length - 1] = {
+                  ...last,
+                  text: response.answer || last.text,
+                  suggestedAction: response.suggested_action,
+                  confidence: response.confidence ? Math.round(response.confidence * 100) : undefined,
+                  supportingPoints: response.supporting_points,
+                  followUpQuestions: response.follow_up_questions,
+                };
+              }
+              return { ...prev, [creativeId]: msgs };
+            });
+            setIsThinking(false);
+          },
+          onError: (error) => {
+            setMessagesByCreative((prev) => {
+              const msgs = [...(prev[creativeId] || [])];
+              const last = msgs[msgs.length - 1];
+              if (last && last.role === "assistant") {
+                msgs[msgs.length - 1] = {
+                  ...last,
+                  text: last.text || `Copilot failed: ${error}`,
+                  isError: true,
+                };
+              }
+              return { ...prev, [creativeId]: msgs };
+            });
+            setIsThinking(false);
+          },
+        }
+      );
       return;
     }
 

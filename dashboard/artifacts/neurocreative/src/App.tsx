@@ -260,7 +260,7 @@ function App() {
               <AlertCircle className="h-4 w-4 text-rose-500 flex-shrink-0" />
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-rose-600 dark:text-rose-400">
-                  OpenAI analysis failed
+                  Analysis failed
                 </div>
                 <p className="text-[11px] text-muted-foreground mt-0.5">
                   {uploadError}. Showing fallback demo data.
@@ -280,7 +280,7 @@ function App() {
                     <span className="text-primary">uploaded analysis</span>
                   </div>
                   <p className="text-[11px] text-muted-foreground mt-0.5">
-                    Showing {uploadedAnalysis!.creatives.length} creatives analyzed by OpenAI
+                    Showing {uploadedAnalysis!.creatives.length} creatives analyzed by pipeline
                   </p>
                 </div>
               </div>
