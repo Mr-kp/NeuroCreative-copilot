@@ -15,9 +15,51 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
+# ─── Load .env ──────────────────────────────────────────────────────────────
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_env_path)
+    except ImportError:
+        # Manual fallback if python-dotenv not installed
+        for line in _env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                if val.strip():
+                    os.environ.setdefault(key.strip(), val.strip())
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
+
+# ─── Optional LLM clients ──────────────────────────────────────────────────
+_openai_client = None
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        print(f"[config] OpenAI client ready (key: ...{OPENAI_API_KEY[-4:]})")
+    except ImportError:
+        print("[config] OPENAI_API_KEY set but 'openai' package not installed. Run: pip install openai")
+
+_gemini_model = None
+if not _openai_client and GOOGLE_API_KEY:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GOOGLE_API_KEY)
+        _gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+        print(f"[config] Gemini client ready (key: ...{GOOGLE_API_KEY[-4:]})")
+    except ImportError:
+        print("[config] GOOGLE_API_KEY set but 'google-generativeai' package not installed. Run: pip install google-generativeai")
+
+HAS_LLM = _openai_client is not None or _gemini_model is not None
+if not HAS_LLM:
+    print("[config] No LLM API key configured — copilot will use rule-based responses")
+
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
-ASSETS_DIR = BASE_DIR.parent / "Smadex_Creative_Intelligence_Dataset_FULL" / "assets"
+ASSETS_DIR = BASE_DIR / "assets"
 
 app = FastAPI(title="NeuroCreative Copilot API")
 
@@ -66,14 +108,33 @@ ACTION_MAP = {
 }
 
 
-def build_creative_row(row, daily_df: pd.DataFrame = None) -> dict:
-    cid = str(int(row["creative_id"])) if pd.notna(row.get("creative_id")) else "0"
+def _safe_int(val):
+    """Safely convert a value to int, returning None for non-numeric strings."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return None
 
-    asset_file = row.get("asset_file", "")
-    if pd.notna(asset_file):
+
+def build_creative_row(row, daily_df: pd.DataFrame = None) -> dict:
+    raw_cid = row.get("creative_id")
+    if pd.notna(raw_cid):
+        # Handle both numeric IDs (500000) and string IDs (CR-1042)
+        try:
+            cid = str(int(float(raw_cid)))
+        except (ValueError, TypeError):
+            cid = str(raw_cid).strip()
+    else:
+        cid = "0"
+
+    asset_file = row.get("asset_file", "") or row.get("asset_path", "")
+    if pd.notna(asset_file) and str(asset_file).strip():
         filename = Path(str(asset_file)).name
     else:
-        filename = f"creative_{cid}.png"
+        # Try creative ID as filename (e.g. CR-1042 -> CR-1042.png)
+        filename = f"{cid}.png"
 
     fmt = str(row.get("format", "unknown")) if pd.notna(row.get("format")) else "unknown"
     fmt_lower = fmt.lower()
@@ -160,7 +221,10 @@ def build_creative_row(row, daily_df: pd.DataFrame = None) -> dict:
 
     annotations = []
     if daily_df is not None and not daily_df.empty and "creative_id" in daily_df.columns:
-        creative_daily = daily_df[daily_df["creative_id"] == int(cid)].sort_values("date") if cid.isdigit() else pd.DataFrame()
+        # Match daily data using string comparison for both numeric and string IDs
+        daily_df_str = daily_df.copy()
+        daily_df_str["creative_id"] = daily_df_str["creative_id"].astype(str).str.strip()
+        creative_daily = daily_df_str[daily_df_str["creative_id"] == cid].sort_values("date") if cid != "0" else pd.DataFrame()
         if len(creative_daily) > 14:
             peak_idx = creative_daily["ctr"].idxmax()
             peak_row = creative_daily.loc[peak_idx]
@@ -186,7 +250,7 @@ def build_creative_row(row, daily_df: pd.DataFrame = None) -> dict:
 
     return {
         "creative_id": cid,
-        "campaign_id": int(row["campaign_id"]) if pd.notna(row.get("campaign_id")) else None,
+        "campaign_id": _safe_int(row.get("campaign_id")),
         "advertiser_id": None,
         "asset_filename": filename,
         "asset_type": asset_type,
@@ -332,12 +396,15 @@ async def analyze_upload(files: list[UploadFile] = File(...)):
         ])
 
         if id_col and "merged" in PRELOADED:
-            uploaded_ids = set(uploaded[id_col].dropna().astype(int).tolist())
-            preloaded_ids = set(PRELOADED["merged"]["creative_id"].dropna().astype(int).tolist())
+            # Use string comparison to support both numeric (500000) and string (CR-1042) IDs
+            uploaded_ids = set(uploaded[id_col].dropna().astype(str).str.strip().tolist())
+            preloaded_ids = set(PRELOADED["merged"]["creative_id"].dropna().astype(str).str.strip().tolist())
             overlap = uploaded_ids & preloaded_ids
 
             if len(overlap) > 0 and len(overlap) >= len(uploaded_ids) * 0.5:
-                filtered = PRELOADED["merged"][PRELOADED["merged"]["creative_id"].isin(uploaded_ids)].copy()
+                preloaded_str = PRELOADED["merged"].copy()
+                preloaded_str["_cid_str"] = preloaded_str["creative_id"].astype(str).str.strip()
+                filtered = preloaded_str[preloaded_str["_cid_str"].isin(uploaded_ids)].drop(columns=["_cid_str"]).copy()
                 print(f"[upload] Matched {len(filtered)} creatives from pre-computed data ({len(overlap)} IDs overlap)")
                 result = _build_response_from_merged(filtered, PRELOADED.get("daily"))
                 result["pipeline_log"] = [f"Matched {len(filtered)} creatives from pre-computed pipeline data."]
@@ -350,7 +417,22 @@ async def analyze_upload(files: list[UploadFile] = File(...)):
 
     print(f"[upload] Running live pipeline on {len(file_data)} uploaded file(s)...")
     t0 = time.time()
-    result = run_pipeline(file_data)
+    try:
+        result = run_pipeline(file_data)
+    except Exception as e:
+        print(f"[upload] Pipeline error: {e}")
+        import traceback
+        traceback.print_exc()
+        if "merged" in PRELOADED:
+            print("[upload] Falling back to pre-computed data after pipeline error")
+            resp = _build_response_from_merged(
+                PRELOADED["merged"].head(100), PRELOADED.get("daily")
+            )
+            resp["pipeline_log"] = [f"Pipeline error: {e}. Using pre-computed data as fallback."]
+            return JSONResponse(content=resp)
+        return JSONResponse(status_code=400, content={
+            "error": f"Pipeline error: {e}. Please upload standard Smadex CSV files.",
+        })
     elapsed = time.time() - t0
 
     print(f"[upload] Pipeline completed in {elapsed:.1f}s")
@@ -374,7 +456,18 @@ async def analyze_upload(files: list[UploadFile] = File(...)):
     if daily_df.empty:
         daily_df = PRELOADED.get("daily", pd.DataFrame())
 
-    resp = _build_response_from_merged(merged, daily_df)
+    try:
+        resp = _build_response_from_merged(merged, daily_df)
+    except Exception as e:
+        print(f"[upload] Response build error: {e}")
+        import traceback
+        traceback.print_exc()
+        if "merged" in PRELOADED:
+            resp = _build_response_from_merged(PRELOADED["merged"].head(100), PRELOADED.get("daily"))
+            resp["pipeline_log"] = result.get("log", []) + [f"Response build error: {e}. Using pre-computed fallback."]
+            return JSONResponse(content=resp)
+        return JSONResponse(status_code=400, content={"error": f"Failed to build response: {e}"})
+
     resp["pipeline_log"] = result["log"]
     print(f"[upload] Returning {len(resp['creatives'])} creatives")
     return JSONResponse(content=resp)
@@ -400,18 +493,67 @@ async def ask_copilot(request_body: dict = None):
     brain = creative.get("brain_scores", {})
     copilot_pre = creative.get("copilot_answers", {})
 
-    q_lower = question.lower()
+    # ── Build LLM context ────────────────────────────────────────────────
+    system_prompt = f"""You are NeuroCreative Copilot — an expert AI assistant for digital advertising creative optimization.
+You analyze ad creatives using brain-inspired metrics and performance data.
 
-    if "fatigu" in q_lower or "dropping" in q_lower or "falling" in q_lower or "declining" in q_lower:
-        answer = copilot_pre.get("why_fatigued", f"Creative {cid} shows fatigue probability of {fatigue_risk}%. {explanation}")
-    elif "scale" in q_lower or "budget" in q_lower or "more spend" in q_lower or "pause" in q_lower:
-        answer = copilot_pre.get("scale_or_pause", f"Recommended action for {cid}: {action}. Fatigue risk is {fatigue_risk}%.")
-    elif "change" in q_lower or "improve" in q_lower or "next" in q_lower or "test" in q_lower:
-        answer = copilot_pre.get("what_to_change", creative.get("next_best_test", "Consider refreshing the visual concept."))
-    elif "brain" in q_lower or "mri" in q_lower or "cognit" in q_lower or "neural" in q_lower:
-        answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}. These are predicted cognitive response patterns derived from visual features."
+CURRENT CREATIVE CONTEXT:
+- Creative ID: {cid}
+- Status: {status}
+- Recommended Action: {action}
+- Fatigue Risk: {fatigue_risk}%
+- Health Score: {creative.get('creative_health_score', 'N/A')}
+- CTR: {creative.get('ctr', 'N/A')}, CVR: {creative.get('cvr', 'N/A')}, ROAS: {creative.get('roas', 'N/A')}
+- Spend: ${creative.get('spend', 'N/A')}, Impressions: {creative.get('impressions', 'N/A')}
+- Brain Scores: Attention={brain.get('attention', 0):.0f}, Reward={brain.get('reward', 0):.0f}, Memory={brain.get('memory', 0):.0f}, Visual Load={brain.get('visualLoad', 0):.0f}, Emotion={brain.get('emotion', 0):.0f}
+- Explanation: {explanation}
+
+{f"PORTFOLIO CONTEXT: " + json.dumps(context) if context else ""}
+
+Respond concisely (2-4 sentences). Be specific and actionable. Reference the actual metrics."""
+
+    # ── Try LLM first ────────────────────────────────────────────────────
+    llm_answer = None
+
+    if _openai_client:
+        try:
+            completion = _openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=300,
+                temperature=0.7,
+            )
+            llm_answer = completion.choices[0].message.content
+        except Exception as e:
+            print(f"[copilot] OpenAI error: {e}")
+
+    elif _gemini_model:
+        try:
+            response = _gemini_model.generate_content(
+                f"{system_prompt}\n\nUser question: {question}",
+            )
+            llm_answer = response.text
+        except Exception as e:
+            print(f"[copilot] Gemini error: {e}")
+
+    # ── Fallback to rule-based ───────────────────────────────────────────
+    if llm_answer:
+        answer = llm_answer
     else:
-        answer = copilot_pre.get("summary", f"Creative {cid} is {status} with recommended action: {action}. {explanation}")
+        q_lower = question.lower()
+        if "fatigu" in q_lower or "dropping" in q_lower or "falling" in q_lower or "declining" in q_lower:
+            answer = copilot_pre.get("why_fatigued", f"Creative {cid} shows fatigue probability of {fatigue_risk}%. {explanation}")
+        elif "scale" in q_lower or "budget" in q_lower or "more spend" in q_lower or "pause" in q_lower:
+            answer = copilot_pre.get("scale_or_pause", f"Recommended action for {cid}: {action}. Fatigue risk is {fatigue_risk}%.")
+        elif "change" in q_lower or "improve" in q_lower or "next" in q_lower or "test" in q_lower:
+            answer = copilot_pre.get("what_to_change", creative.get("next_best_test", "Consider refreshing the visual concept."))
+        elif "brain" in q_lower or "mri" in q_lower or "cognit" in q_lower or "neural" in q_lower:
+            answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}. These are predicted cognitive response patterns derived from visual features."
+        else:
+            answer = copilot_pre.get("summary", f"Creative {cid} is {status} with recommended action: {action}. {explanation}")
 
     sentences = re.split(r'(?<=[.!?])\s+', answer)
     chunks = []
@@ -436,6 +578,7 @@ async def ask_copilot(request_body: dict = None):
             "What should we change?",
             "How does this compare to the campaign average?",
         ],
+        "llm_powered": llm_answer is not None,
     }
 
     async def event_stream():
@@ -449,6 +592,25 @@ async def ask_copilot(request_body: dict = None):
 
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
+
+from fastapi import HTTPException
+from fastapi.responses import FileResponse
+
+FULL_ASSETS_DIR = BASE_DIR / "dashboard" / "attached_assets" / "smadex_dataset" / "assets"
+
+@app.get("/creatives/{filename}")
+async def get_creative(filename: str):
+    # Check local test assets first
+    p1 = ASSETS_DIR / filename
+    if p1.exists():
+        return FileResponse(p1)
+    
+    # Check demo dataset assets
+    p2 = FULL_ASSETS_DIR / filename
+    if p2.exists():
+        return FileResponse(p2)
+        
+    raise HTTPException(status_code=404, detail="Creative not found")
 
 if __name__ == "__main__":
     import uvicorn

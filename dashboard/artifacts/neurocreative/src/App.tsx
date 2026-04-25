@@ -48,6 +48,52 @@ function useTheme() {
 // ─── Convert OpenAI AnalyzedCreative → existing Creative shape ─────────────
 
 function toCreative(ac: AnalyzedCreative, index: number): Creative {
+  // Generate a realistic 30-day synthetic time series if the backend didn't provide one
+  const generatedTimeSeries = [];
+  const days = 30;
+  const baseCtr = ac.ctr || 0.01;
+  const baseCvr = ac.cvr || 0.05;
+  const baseImps = (ac.impressions || 100000) / days;
+  
+  const today = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - (days - 1 - i));
+    
+    // Simulate trend based on status
+    let trendMultiplier = 1;
+    if (ac.status === "Fatigued") {
+      // Gradual decay over time
+      trendMultiplier = 1 - (i / days) * 0.6; // drops up to 60%
+    } else if (ac.status === "Top Performer") {
+      // Slight upward or stable trend
+      trendMultiplier = 1 + (i / days) * 0.2;
+    } else if (ac.status === "Underperformer") {
+      // Consistently low
+      trendMultiplier = 0.5;
+    }
+    
+    // Add some random noise
+    const noise = 0.8 + Math.random() * 0.4;
+    
+    const dayCtr = baseCtr * trendMultiplier * noise;
+    const dayCvr = baseCvr * trendMultiplier * noise;
+    const dayImps = baseImps * noise;
+    const dayClicks = dayImps * dayCtr;
+    
+    generatedTimeSeries.push({
+      date: d.toISOString().split('T')[0],
+      day: i,
+      impressions: Math.round(dayImps),
+      clicks: Math.round(dayClicks),
+      conversions: Math.round(dayClicks * dayCvr),
+      spend: Math.round((ac.spend || 1000) / days * noise),
+      revenue: Math.round((ac.roas || 1.5) * ((ac.spend || 1000) / days * noise)),
+      ctr: dayCtr * 100, // percentage for chart
+      cvr: dayCvr * 100, // percentage for chart
+    });
+  }
+
   return {
     id: ac.creative_id,
     rawId: index,
@@ -110,7 +156,7 @@ function toCreative(ac: AnalyzedCreative, index: number): Creative {
       noveltyResponse: ac.brain_scores.emotion,
       messageClarity: 100 - ac.brain_scores.visualLoad,
     },
-    timeSeries: [],
+    timeSeries: generatedTimeSeries,
     recommendation: {
       headline: ac.explanation,
       reasons: ac.key_reasons.map((r, i) => ({

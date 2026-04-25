@@ -167,7 +167,30 @@ def build_master_table(tables: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, l
 
     for col in ["creative_id", "campaign_id", "advertiser_id"]:
         if col in master.columns:
-            master[col] = pd.to_numeric(master[col], errors="coerce").astype("Int64")
+            # Only coerce to numeric if the column appears to contain numeric data
+            # This preserves string IDs like 'CR-1042'
+            test_vals = master[col].dropna().astype(str)
+            if len(test_vals) > 0 and test_vals.str.match(r'^-?\d+(\.\d+)?$').all():
+                master[col] = pd.to_numeric(master[col], errors="coerce").astype("Int64")
+            else:
+                master[col] = master[col].astype(str)
+
+    # Coerce expected numeric columns to numeric — user CSVs may have
+    # text labels (e.g. "High", "Low") instead of float values.
+    numeric_cols = [
+        "total_spend_usd", "total_impressions", "total_clicks",
+        "total_conversions", "total_revenue_usd",
+        "overall_ctr", "overall_cvr", "overall_roas", "overall_ipm",
+        "ctr_decay_pct", "cvr_decay_pct", "first_7d_ctr", "last_7d_ctr",
+        "text_density", "readability_score", "brand_visibility_score",
+        "clutter_score", "novelty_score", "motion_score", "faces_count",
+        "product_count", "duration_sec", "has_price", "has_discount_badge",
+        "has_gameplay", "has_ugc_style", "fatigue_day", "total_days_active",
+        "perf_score",
+    ]
+    for col in numeric_cols:
+        if col in master.columns:
+            master[col] = pd.to_numeric(master[col], errors="coerce")
 
     return master, log
 
@@ -260,6 +283,19 @@ def compute_brain_features(master: pd.DataFrame) -> tuple[pd.DataFrame, list[str
     has_emotion = "emotional_tone" in df.columns
     has_faces = "faces_count" in df.columns
     has_ugc = "has_ugc_style" in df.columns
+
+    # Coerce numeric columns — user CSVs may have text labels (e.g. "High")
+    # instead of numeric values. Convert to numeric, replacing non-numeric with NaN.
+    numeric_cols = [
+        "motion_score", "novelty_score", "clutter_score", "duration_sec",
+        "brand_visibility_score", "has_discount_badge", "has_price",
+        "product_count", "readability_score", "text_density",
+        "faces_count", "has_ugc_style",
+    ]
+    df = df.copy()
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     attention_raw = np.zeros(len(df))
     if has_motion:
@@ -545,6 +581,11 @@ def compute_predictions_ml(master: pd.DataFrame, decay: pd.DataFrame) -> tuple[p
 
     if merged["_status_label"].isna().all() or merged["_status_label"].nunique() < 2:
         log.append("Insufficient label variety — falling back to heuristic")
+        return compute_predictions_heuristic(master, decay)
+
+    # ML needs enough data to be meaningful; with < 50 rows, heuristics are more reliable
+    if len(merged) < 50:
+        log.append(f"Only {len(merged)} rows — too few for reliable ML, using heuristic predictions")
         return compute_predictions_heuristic(master, decay)
 
     numeric_candidates = [

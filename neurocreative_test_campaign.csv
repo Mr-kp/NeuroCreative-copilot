@@ -1,0 +1,7 @@
+creative_id,campaign_id,advertiser_id,date,country,os,impressions,clicks,conversions,spend,revenue,creative_status,fatigue_day,asset_path,format,cta_text,dominant_color,tone,text_density,has_ugc_style,has_gameplay,brand_visibility_score,clutter_score,novelty_score,motion_score,first_7d_ctr,last_7d_ctr,ctr,cvr,roas,ctr_decay_pct
+CR-1042,CMP-NEURO-01,ADV-GAME-01,2026-04-25,ES,iOS,120000,4560,386,8200,10400,fatigued,12,assets/CR-1042.png,image,PLAY NOW,pink,urgent,high,false,true,74,82,59,70,0.048,0.016,0.038,0.08465,1.268,-66.7
+CR-2031,CMP-NEURO-01,ADV-GAME-01,2026-04-25,US,Android,185000,9435,1020,11000,31700,top_performer,,assets/CR-2031.png,image,START WINNING,pink,exciting,low,false,true,88,34,82,77,0.052,0.049,0.051,0.10811,2.882,-5.8
+CR-1177,CMP-NEURO-02,ADV-FIT-02,2026-04-25,GB,iOS,96000,2784,230,5600,9800,stable,,assets/CR-1177.png,image,TRY FREE,pink,motivational,medium,true,false,80,48,67,42,0.031,0.028,0.029,0.08261,1.75,-9.7
+CR-0884,CMP-NEURO-03,ADV-SHOP-03,2026-04-25,FR,Android,150000,1650,68,9400,5100,underperformer,,assets/CR-0884.png,image,SHOP NOW,pink,sales,high,false,false,52,89,28,25,0.013,0.01,0.011,0.04121,0.543,-23.1
+CR-3020,CMP-NEURO-02,ADV-FIT-02,2026-04-25,DE,iOS,132000,4752,310,7600,11100,fatigued,15,assets/CR-3020.png,image,JOIN TODAY,pink,aspirational,medium,true,false,72,61,44,39,0.041,0.018,0.036,0.06524,1.461,-56.1
+CR-4112,CMP-NEURO-04,ADV-FOOD-04,2026-04-25,ES,Android,171000,7524,715,9800,24500,top_performer,,assets/CR-4112.png,image,ORDER NOW,pink,happy,low,true,false,86,38,76,47,0.046,0.043,0.044,0.09503,2.5,-6.5
