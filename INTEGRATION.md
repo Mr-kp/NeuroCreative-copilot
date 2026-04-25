@@ -235,11 +235,18 @@ Applied to each creative in order of priority:
 - **Input**: JSON `{ question: string, selectedCreative: object, dashboardContext?: object }`
 - **Output**: SSE stream
   - `event: token` events with `{ text: string }` chunks (3 words at a time)
-  - `event: done` event with full `CopilotApiResponse` object
-- **Logic**: Pattern-matches the question against keywords (fatigue, scale, change, brain) and pulls from the creative's pre-computed copilot answers
+  - `event: done` event with full `CopilotApiResponse` object including `llm_powered: bool`
+- **AI Model Resolution** (in priority order):
+  1. **OpenAI GPT-4o-mini**: Used when `OPENAI_API_KEY` is set in `.env`. Sends full creative context (status, metrics, brain scores, explanation) as system prompt.
+  2. **Google Gemini 2.0 Flash**: Used when `GOOGLE_API_KEY` is set and no OpenAI key. Same prompt structure.
+  3. **Rule-based**: Keyword matching (fatigue, scale, change, brain) against pre-computed copilot answers. Always available.
+- **System prompt includes**: creative ID, status, recommended action, fatigue risk, CTR/CVR/ROAS, brain scores, explanation
 
 ### `GET /assets/{filename}`
-- Serves PNG creative images from `../Smadex_Creative_Intelligence_Dataset_FULL/assets/`
+- Serves PNG creative images from local `assets/` directory
+
+### `GET /creatives/{filename}`
+- Serves PNG creative images, checking local `assets/` first then embedded dataset `dashboard/attached_assets/smadex_dataset/assets/`
 
 ---
 
@@ -265,11 +272,13 @@ Applied to each creative in order of priority:
 - Python 3.11+ with pip
 - Node.js 20+ with npm
 
-### Full Setup (live pipeline)
+### Full Setup (live pipeline + LLM copilot)
 
 ```bash
 # Terminal 1: Backend
-pip install fastapi uvicorn python-multipart sse-starlette pandas numpy scipy scikit-learn lightgbm
+pip install fastapi uvicorn python-multipart sse-starlette pandas numpy scipy scikit-learn lightgbm python-dotenv openai
+cp .env.example .env
+# Edit .env and add OPENAI_API_KEY=sk-... (or GOOGLE_API_KEY=...)
 python api_server.py            # http://localhost:8000
 
 # Terminal 2: Frontend
@@ -374,6 +383,13 @@ pandas
 numpy
 ```
 
+### Python (copilot LLM — optional)
+```
+openai               # GPT-4o-mini copilot responses (needs OPENAI_API_KEY in .env)
+google-generativeai  # Gemini 2.0 Flash copilot responses (needs GOOGLE_API_KEY in .env)
+python-dotenv        # Load .env file (has manual fallback if not installed)
+```
+
 ### Python (pipeline — optional with fallbacks)
 ```
 scipy          # Decay curve fitting (fallback: linear heuristic)
@@ -395,17 +411,62 @@ React 19, Vite 6, TypeScript 5.9, Tailwind CSS 4, shadcn/ui (Radix), Recharts, L
 
 ---
 
+## AI/ML Models Summary
+
+### Copilot LLM (optional, in `api_server.py`)
+
+The copilot chat uses a cascading LLM resolution:
+
+```
+User asks question
+        |
+        v
+OPENAI_API_KEY set?  --yes-->  GPT-4o-mini (max 300 tokens, temp 0.7)
+        |
+        no
+        v
+GOOGLE_API_KEY set?  --yes-->  Gemini 2.0 Flash
+        |
+        no
+        v
+Rule-based keyword matching (always works, no API key needed)
+```
+
+All paths stream via SSE. The system prompt includes full creative context: status, metrics, brain scores, explanation. Response includes `llm_powered: true/false`.
+
+### ML Predictions (in `pipeline_runner.py`)
+
+| Model | Type | Classes/Output | Training |
+|-------|------|----------------|----------|
+| LightGBM Classifier | Gradient boosting | 4-class: top_performer, stable, fatigued, underperformer | Trained per-upload on uploaded data with GroupShuffleSplit |
+| LightGBM Regressor | Gradient boosting | Continuous fatigue probability (0-1) | Same train/test split as classifier |
+| Heuristic fallback | Rule-based formula | Status + fatigue from CTR decay, ROAS, decay rate | No training needed |
+
+### Brain Scores (in `pipeline_runner.py`)
+
+Custom weighted formulas computing 5 neuro-inspired scores from visual metadata. Pure numpy, always works. See Brain Feature Formulas section below.
+
+### Decay Curves (in `pipeline_runner.py`)
+
+| Method | When | How |
+|--------|------|-----|
+| scipy `curve_fit` | scipy installed + daily data available | Fits `CTR(t) = a * exp(-lambda * t)` per creative |
+| Linear heuristic | scipy unavailable + daily data available | Compares first-half vs second-half CTR mean |
+| Master heuristic | No daily data | Uses `ctr_decay_pct` from uploaded CSV |
+
+---
+
 ## What Was Changed For Integration
 
 | What | Before | After |
 |------|--------|-------|
 | Backend | Express + OpenAI API | FastAPI + live pipeline + pre-computed fallback |
 | Data source | OpenAI generates analysis | Pipeline runs live on uploaded CSVs |
+| Copilot | OpenAI chat completions (required) | GPT-4o-mini / Gemini 2.0 Flash / rule-based (all optional) |
 | Upload | Single CSV, match against pre-computed | Multi-file CSV, auto-detect + live pipeline |
-| Copilot | OpenAI chat completions | Rule-based answers streamed via SSE |
 | Frontend upload | Single file picker | Multi-file drag-and-drop with auto-detection |
 | API client | Single JSON fetch | Multi-file upload + SSE streaming |
-| Vite proxy | `localhost:3001` (Express) | `localhost:8000` (FastAPI) |
+| Vite proxy | `localhost:3001` (Express) | `localhost:8000` (FastAPI) + `/creatives` + `/assets` |
+| Asset serving | External Smadex dataset dir | Local `assets/` directory + embedded dataset fallback |
+| Creative IDs | Numeric only (500000) | Numeric + string (APPLE-01, CR-1042) |
 | Pipeline scripts | Outside repo, offline only | Integrated in `pipeline_runner.py` + `pipeline/` |
-
-No React components, UI layout, or styling were modified beyond the upload component. The backend serves the exact same JSON shapes the frontend already expected.

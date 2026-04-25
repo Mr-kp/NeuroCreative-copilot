@@ -4,6 +4,70 @@ All notable changes to NeuroCreative Copilot are documented in this file.
 
 ---
 
+## [2026-04-26] - LLM Copilot + Real Brand Demo + Asset Serving
+
+### Summary
+
+A teammate integrated LLM-powered copilot responses (OpenAI GPT-4o-mini or Google Gemini 2.0 Flash), added real brand demo data (Apple, Nike, Coca-Cola, McDonalds) with creative images, fixed asset serving to use local `assets/` directory, and added a `/creatives/{filename}` endpoint. Updated documentation to reflect all AI/ML models used across the project.
+
+### AI/ML Models Used
+
+| Component | Model | Purpose | Required? |
+|-----------|-------|---------|-----------|
+| Copilot chat | **OpenAI GPT-4o-mini** | Natural language answers about creatives | Optional — rule-based fallback |
+| Copilot chat | **Google Gemini 2.0 Flash** | Alternative LLM (if no OpenAI key) | Optional — rule-based fallback |
+| Status classifier | **LightGBM LGBMClassifier** | 4-class creative status prediction | Optional — heuristic fallback |
+| Fatigue regressor | **LightGBM LGBMRegressor** | Continuous fatigue probability | Optional — heuristic fallback |
+| Decay curves | **scipy curve_fit** | Exponential CTR decay fitting | Optional — linear heuristic fallback |
+| Brain scores | **Custom weighted formulas** | attention / reward / memory / emotion / visual_load | Always works (pure numpy) |
+
+### Added
+
+- **LLM integration in copilot** (`api_server.py`):
+  - OpenAI GPT-4o-mini: primary LLM for copilot answers when `OPENAI_API_KEY` is set
+  - Google Gemini 2.0 Flash: fallback LLM when `GOOGLE_API_KEY` is set (only if no OpenAI key)
+  - Rule-based: final fallback when no LLM keys configured (original behavior)
+  - System prompt includes full creative context (status, metrics, brain scores, explanation)
+  - Response includes `llm_powered: true/false` field
+- **`.env.example`**: Documents optional API keys (`OPENAI_API_KEY`, `GOOGLE_API_KEY`)
+- **Real brand demo data**:
+  - `real_brands_creatives.csv`: 4 creatives (Apple, Nike, Coca-Cola, McDonalds)
+  - `real_brands_daily.csv`: 120 daily time-series rows for the 4 brands
+  - `assets/apple_ad.png`, `assets/nike_ad.png`, `assets/coca_cola_ad.png`, `assets/mcdonalds_ad.png`
+  - `assets/CR-*.png`: 6 Smadex creative images
+  - `neurocreative_test_campaign.csv`, `test_creatives.csv`: test fixtures
+- **`GET /creatives/{filename}`** endpoint: Serves creative images from local `assets/` or embedded dataset
+- **String creative ID support**: `build_creative_row()` now handles both numeric (500000) and string (CR-1042, APPLE-01) IDs
+
+### Changed
+
+- **`api_server.py`**: ASSETS_DIR changed from `../Smadex_Creative_Intelligence_Dataset_FULL/assets` to local `assets/` directory
+- **`vite.config.ts`**: Added proxy rules for `/creatives` and `/assets` to backend
+- **`pipeline_runner.py`**: Error handling in `run_pipeline()` call, traceback logging on pipeline errors
+- **`App.tsx`**: Updated to handle real brand demo data and new asset paths
+- **Documentation**: Updated README.md, INTEGRATION.md, CHANGELOG.md with AI model details
+
+### How Copilot Works Now
+
+```
+User asks a question
+        |
+        v
+Has OPENAI_API_KEY?  ──yes──>  GPT-4o-mini generates answer
+        |
+        no
+        v
+Has GOOGLE_API_KEY?  ──yes──>  Gemini 2.0 Flash generates answer
+        |
+        no
+        v
+Rule-based pattern matching (fatigue/scale/change/brain keywords)
+```
+
+All paths stream via SSE. LLM answers include the creative's full context in the system prompt.
+
+---
+
 ## [2026-04-25] - Live Pipeline Integration: Upload Smadex CSVs → Run Analysis
 
 ### Summary

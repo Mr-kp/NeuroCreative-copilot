@@ -14,16 +14,20 @@ Built for the **Smadex Creative Intelligence Challenge** at HackUPC 2026.
 # 1. Install Python dependencies
 pip install fastapi uvicorn python-multipart sse-starlette pandas numpy scipy scikit-learn lightgbm
 
-# 2. Start backend (port 8000)
+# 2. (Optional) Add LLM keys for smarter copilot answers
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY or GOOGLE_API_KEY
+
+# 3. Start backend (port 8000)
 python api_server.py
 
-# 3. Start frontend (port 5173)
+# 4. Start frontend (port 5173)
 cd dashboard/artifacts/neurocreative
 npm install
 npm run dev:frontend
 ```
 
-Open **http://localhost:5173**. Upload your Smadex CSV files to run the full analysis pipeline live.
+Open **http://localhost:5173**. Upload Smadex CSV files to run the full analysis pipeline live.
 
 ---
 
@@ -66,9 +70,21 @@ Open **http://localhost:5173**. Upload your Smadex CSV files to run the full ana
 |-------|------|
 | Backend | Python, FastAPI, SSE-Starlette, pandas, numpy, scipy, scikit-learn, LightGBM |
 | Frontend | React 19, Vite 6, TypeScript 5.9, Tailwind CSS 4, shadcn/ui, Recharts |
+| Copilot LLM | OpenAI GPT-4o-mini (primary) / Google Gemini 2.0 Flash (fallback) / rule-based (no-key fallback) |
 | ML | LightGBM (fatigue classifier + regressor), scipy (decay curve fitting) |
 | Brain Scoring | Custom neuro-inspired model: attention, reward, memory, emotion, visual_load |
 | Streaming | Server-Sent Events (SSE) for real-time copilot responses |
+
+### AI/ML Models
+
+| Model | What it does | Required? |
+|-------|-------------|-----------|
+| **OpenAI GPT-4o-mini** | Generates copilot chat answers about creatives | Optional (`.env` key) |
+| **Google Gemini 2.0 Flash** | Alternative copilot LLM | Optional (`.env` key) |
+| **LightGBM Classifier** | Predicts creative status: top_performer / stable / fatigued / underperformer | Optional (heuristic fallback) |
+| **LightGBM Regressor** | Predicts continuous fatigue probability (0-1) | Optional (heuristic fallback) |
+| **scipy curve_fit** | Fits exponential CTR decay curves per creative | Optional (linear fallback) |
+| **Custom brain formulas** | Computes attention, reward, memory, emotion, visual_load from visual metadata | Always works (numpy only) |
 
 ---
 
