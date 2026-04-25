@@ -19,7 +19,23 @@ Replaced the OpenAI-dependent Express/Node backend with a Python FastAPI backend
   - `model_outputs.csv` — Predicted status, fatigue probability, recommendation, and explanation per creative.
   - `brain_features.csv` — Brain-inspired scores (attention, reward, memory, emotion, visual_load) per creative.
   - `daily_fatigue_table.csv` — 52,350 daily time-series rows with CTR/CVR/ROAS for trend charts.
-- **`INTEGRATION.md`** — Full architecture documentation covering branches, data pipeline, API contract, component map, dependencies, and the integration diff.
+- **`pipeline/creative_intelligence/`** — All 7 backend pipeline scripts, re-runnable:
+  - `data_pipeline.py` — Joins Smadex CSVs into master_creatives.csv
+  - `brain_features.py` — Computes brain-inspired scores from visual metadata
+  - `decay_analysis.py` — Fits CTR decay curves per creative using scipy
+  - `survival_analysis.py` — Kaplan-Meier + Cox PH fatigue modeling
+  - `ml_models.py` — LightGBM classifier with SHAP feature importance
+  - `recommendation_engine.py` — Final Scale/Monitor/Pivot/Pause decision layer with explanations
+  - `integrate_tribe_v2.py` — Optional TRIBE v2 neural feature enhancement
+- **`pipeline/time_decay/`** — Alternative XGBoost AFT survival pipeline:
+  - `run_tribe_batch.py` — Batch TRIBE v2 inference on creative assets
+  - `build_survival_targets.py` — Fatigue event detection from CTR smoothing
+  - `fuse_features.py` — Builds analytical base table with one-hot encoding
+  - `train_aft_model.py` — XGBoost AFT survival model for lifespan prediction
+  - `generate_copilot_feed.py` — Final copilot action feed with decision tags
+  - `PIPELINE_DOCUMENTATION.md` — Full documentation for the time-decay pipeline
+- **`pipeline/backend_api.py`** — Standalone TRIBE v2 live inference FastAPI server (for GPU/Colab use)
+- **`INTEGRATION.md`** — Full architecture documentation covering branches, data pipeline, API contract, component map, dependencies, re-run instructions, and the integration diff.
 - **`CHANGELOG.md`** — This file.
 
 ### Changed
