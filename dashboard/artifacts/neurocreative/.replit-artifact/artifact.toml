@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "NeuroCreative Copilot"
+version = "1.0.0"
+id = "artifacts/neurocreative"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18511
+
+[services.development]
+run = "pnpm --filter @workspace/neurocreative run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/neurocreative", "run", "build" ]
+publicDir = "artifacts/neurocreative/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18511"
+BASE_PATH = "/"

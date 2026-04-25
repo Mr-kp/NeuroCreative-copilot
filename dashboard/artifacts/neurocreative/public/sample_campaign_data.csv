@@ -1,0 +1,6 @@
+creative_id,campaign_id,advertiser_id,impressions,clicks,conversions,spend,revenue,ctr,cvr,roas,creative_status,fatigue_day,format,cta_text,dominant_color,tone,text_density,has_ugc_style,has_gameplay,brand_visibility_score,clutter_score,novelty_score,motion_score,asset_path
+CR-001,CAMP-101,ADV-10,2500000,15000,1200,8500,28900,0.60,8.00,3.40,active,,video,Install Now,blue,energetic,Medium,false,true,72,15,68,85,creative_001.mp4
+CR-002,CAMP-101,ADV-10,1800000,7200,430,6200,14260,0.40,5.97,2.30,active,,image,Shop Now,red,urgent,High,false,false,55,42,35,10,creative_002.png
+CR-003,CAMP-102,ADV-10,3200000,22400,2800,12000,52800,0.70,12.50,4.40,active,,playable,Try Free,purple,playful,Low,false,true,80,8,82,92,creative_003.png
+CR-004,CAMP-103,ADV-11,950000,2850,114,4800,2736,0.30,4.00,0.57,fatigued,18,video,Learn More,green,calm,Medium,true,false,45,28,22,40,creative_004.mp4
+CR-005,CAMP-103,ADV-11,4100000,28700,3444,15000,57540,0.70,12.00,3.84,active,,image,Get Started,orange,excited,Low,true,false,68,12,71,15,creative_005.jpg
