@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "HPCkvdUq9p9GCG2oy8Py7"
+uri = "file://artifacts/neurocreative/src/assets/brain-activity.png"
+type = "image"
+title = "realistic 3d brain glow"
