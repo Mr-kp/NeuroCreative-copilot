@@ -66,7 +66,7 @@ if not LLM_PROVIDER:
 _openai_client = None
 _gemini_model = None
 
-if LLM_PROVIDER == "openai" and OPENAI_API_KEY:
+if OPENAI_API_KEY:
     try:
         from openai import OpenAI
         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -74,7 +74,7 @@ if LLM_PROVIDER == "openai" and OPENAI_API_KEY:
     except ImportError:
         print("[config] OPENAI_API_KEY set but 'openai' package not installed. Run: pip install openai")
 
-elif LLM_PROVIDER == "google" and GOOGLE_API_KEY:
+if GOOGLE_API_KEY and not _openai_client:
     try:
         import google.generativeai as genai
         genai.configure(api_key=GOOGLE_API_KEY)
@@ -539,58 +539,332 @@ async def ask_copilot(request_body: dict = None):
     context = request_body.get("dashboardContext", {})
     image_base64 = request_body.get("imageBase64", "")
 
-    if not question or not creative:
-        return JSONResponse(status_code=400, content={"error": "question and selectedCreative required"})
+    if not question:
+        return JSONResponse(status_code=400, content={"error": "question required"})
 
     cid = creative.get("creative_id", "unknown")
-    status = creative.get("status", "Unknown")
     action = creative.get("recommended_action", "Monitor")
-    explanation = creative.get("explanation", "")
     fatigue_risk = creative.get("fatigue_risk", 0)
     brain = creative.get("brain_scores", {})
     copilot_pre = creative.get("copilot_answers", {})
 
-    system_prompt = build_copilot_chat_prompt(question, creative)
+    AGENT_SYSTEM = (
+        "You are NeuroCreative Copilot — an expert AI agent for ad creative analysis.\n"
+        "You have tools to look up real data. USE THEM before answering.\n"
+        "Always call relevant tools to ground your answer in real metrics.\n"
+        "Be specific: reference actual numbers, brain scores, ML predictions.\n"
+        "Keep answers to 2-4 sentences. End with one actionable recommendation.\n"
+    )
+
+    tool_schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_creative_details",
+                "description": "Get full details for a specific creative by ID (metrics, metadata, brain scores, ML predictions)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "creative_id": {"type": "string", "description": "Creative ID (e.g. '500000' or 'CR-1042')"},
+                    },
+                    "required": ["creative_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_creatives",
+                "description": "Search creatives by filters. Returns top matches with key metrics.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "enum": ["Top Performer", "Stable", "Fatigued", "Underperformer"], "description": "Filter by status"},
+                        "vertical": {"type": "string", "description": "Filter by vertical (e.g. 'gaming', 'ecommerce')"},
+                        "format": {"type": "string", "description": "Filter by format (e.g. 'interstitial', 'rewarded_video')"},
+                        "sort_by": {"type": "string", "enum": ["ctr", "roas", "fatigue_risk", "health"], "description": "Sort results by metric"},
+                        "limit": {"type": "integer", "description": "Max results to return (default 5)", "default": 5},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_portfolio_summary",
+                "description": "Get aggregate portfolio statistics: total spend, avg CTR/CVR/ROAS, fatigue distribution, top/bottom performers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "group_by": {"type": "string", "enum": ["status", "vertical", "format"], "description": "Group results by dimension"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "predict_creative_outcome",
+                "description": "Run ML prediction (LightGBM v3, 77 features) for a creative to get predicted status, fatigue probability, and performance score",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "creative_id": {"type": "string", "description": "Creative ID to predict for"},
+                    },
+                    "required": ["creative_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_neuroscience_insight",
+                "description": "Get neuroscience/psychology insight for a specific topic relevant to the creative analysis",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "enum": [
+                            "attention_capture", "reward_processing", "memory_encoding",
+                            "emotional_engagement", "cognitive_load", "creative_fatigue",
+                            "color_psychology", "motion_dynamics", "face_effect"
+                        ], "description": "The neuroscience topic to get insight on"},
+                    },
+                    "required": ["topic"],
+                },
+            },
+        },
+    ]
+
+    def _get_creative_details(cid_query: str) -> dict:
+        if "merged" not in PRELOADED:
+            return {"error": "No pre-computed data available"}
+        df = PRELOADED["merged"]
+        try:
+            cid_num = str(int(float(cid_query)))
+        except (ValueError, TypeError):
+            cid_num = cid_query.strip()
+        row = df[df["creative_id"].astype(str) == cid_num]
+        if row.empty:
+            return {"error": f"Creative {cid_query} not found"}
+        r = row.iloc[0]
+        brain_df = PRELOADED.get("brain_features", pd.DataFrame())
+        brow = brain_df[brain_df["creative_id"].astype(str) == cid_num] if not brain_df.empty else pd.DataFrame()
+        result = {
+            "creative_id": cid_num,
+            "app_name": r.get("app_name", ""),
+            "vertical": r.get("vertical", ""),
+            "format": r.get("format", ""),
+            "status": r.get("creative_status", ""),
+            "metrics": {
+                "ctr": round(float(r.get("overall_ctr", 0)), 4),
+                "cvr": round(float(r.get("overall_cvr", 0)), 4),
+                "roas": round(float(r.get("overall_roas", 0)), 4),
+                "spend": round(float(r.get("total_spend_usd", 0)), 2),
+                "impressions": int(r.get("total_impressions", 0)),
+                "ctr_decay_pct": round(float(r.get("ctr_decay_pct", 0)), 3),
+            },
+            "visual_features": {
+                "motion_score": float(r.get("motion_score", 0)),
+                "novelty_score": float(r.get("novelty_score", 0)),
+                "clutter_score": float(r.get("clutter_score", 0)),
+                "faces_count": int(r.get("faces_count", 0)),
+                "has_discount_badge": bool(r.get("has_discount_badge", 0)),
+                "has_gameplay": bool(r.get("has_gameplay", 0)),
+                "text_density": float(r.get("text_density", 0)),
+                "brand_visibility": float(r.get("brand_visibility_score", 0)),
+            },
+            "brain_scores": {},
+            "ml_prediction": {},
+        }
+        if not brow.empty:
+            b = brow.iloc[0]
+            result["brain_scores"] = {
+                "attention": round(float(b.get("attention_score", 0)), 1),
+                "reward": round(float(b.get("reward_score", 0)), 1),
+                "memory": round(float(b.get("memory_score", 0)), 1),
+                "emotion": round(float(b.get("emotion_score", 0)), 1),
+                "visual_load": round(float(b.get("visual_load_score", 0)), 1),
+            }
+        mo_df = PRELOADED.get("model_outputs", pd.DataFrame())
+        if not mo_df.empty:
+            mrow = mo_df[mo_df["creative_id"].astype(str) == cid_num]
+            if not mrow.empty:
+                m = mrow.iloc[0]
+                result["ml_prediction"] = {
+                    "predicted_status": str(m.get("predicted_status", "")),
+                    "fatigue_probability": round(float(m.get("fatigue_probability", 0)), 3),
+                    "recommendation": str(m.get("recommendation", "")),
+                    "explanation": str(m.get("explanation", "")),
+                }
+        return result
+
+    def _search_creatives(status=None, vertical=None, format=None, sort_by="ctr", limit=5) -> list:
+        if "merged" not in PRELOADED:
+            return []
+        df = PRELOADED["merged"]
+        if status:
+            df = df[df["creative_status"].str.lower() == status.lower().replace(" ", "_")]
+        if vertical:
+            df = df[df["vertical"].str.lower() == vertical.lower()]
+        if format:
+            fmt_map = {"rewarded_video": "rewarded_video", "interstitial": "interstitial", "video": "video", "banner": "banner"}
+            fmt_val = fmt_map.get(format.lower(), format.lower())
+            df = df[df["format"].str.lower() == fmt_val]
+        sort_col = {"ctr": "overall_ctr", "roas": "overall_roas", "fatigue_risk": "fatigue_probability", "health": "perf_score"}.get(sort_by, "overall_ctr")
+        if sort_col in df.columns:
+            ascending = sort_by == "fatigue_risk"
+            df = df.sort_values(sort_col, ascending=ascending)
+        results = []
+        for _, r in df.head(limit).iterrows():
+            results.append({
+                "creative_id": str(int(float(r["creative_id"]))) if pd.notna(r.get("creative_id")) else "unknown",
+                "app_name": r.get("app_name", ""),
+                "status": r.get("creative_status", ""),
+                "ctr": round(float(r.get("overall_ctr", 0)), 4),
+                "roas": round(float(r.get("overall_roas", 0)), 4),
+                "spend": round(float(r.get("total_spend_usd", 0)), 2),
+                "impressions": int(r.get("total_impressions", 0)),
+                "format": r.get("format", ""),
+                "vertical": r.get("vertical", ""),
+            })
+        return results
+
+    def _get_portfolio_summary(group_by=None) -> dict:
+        if "merged" not in PRELOADED:
+            return {"error": "No data"}
+        df = PRELOADED["merged"]
+        summary = {
+            "total_creatives": len(df),
+            "total_spend": round(float(df["total_spend_usd"].sum()), 2),
+            "avg_ctr": round(float(df["overall_ctr"].mean()), 4),
+            "avg_cvr": round(float(df["overall_cvr"].mean()), 4),
+            "avg_roas": round(float(df["overall_roas"].mean()), 4),
+        }
+        if "creative_status" in df.columns:
+            status_counts = df["creative_status"].value_counts().to_dict()
+            summary["status_distribution"] = status_counts
+        if group_by and group_by in df.columns:
+            groups = {}
+            for name, group in df.groupby(group_by):
+                groups[str(name)] = {
+                    "count": len(group),
+                    "avg_ctr": round(float(group["overall_ctr"].mean()), 4),
+                    "avg_roas": round(float(group["overall_roas"].mean()), 4),
+                    "avg_spend": round(float(group["total_spend_usd"].mean()), 2),
+                }
+            summary[f"by_{group_by}"] = groups
+        return summary
+
+    def _predict_creative_outcome(cid_query: str) -> dict:
+        if "merged" not in PRELOADED:
+            return {"error": "No data for prediction"}
+        df = PRELOADED["merged"]
+        try:
+            cid_num = str(int(float(cid_query)))
+        except (ValueError, TypeError):
+            cid_num = cid_query.strip()
+        row = df[df["creative_id"].astype(str) == cid_num]
+        if row.empty:
+            return {"error": f"Creative {cid_query} not found"}
+        r = row.iloc[0].to_dict()
+        brain_df = PRELOADED.get("brain_features", pd.DataFrame())
+        brain_row = brain_df[brain_df["creative_id"].astype(str) == cid_num] if not brain_df.empty else pd.DataFrame()
+        brain_scores = {}
+        if not brain_row.empty:
+            b = brain_row.iloc[0]
+            brain_scores = {
+                "attention_score": float(b.get("attention_score", 50)),
+                "reward_score": float(b.get("reward_score", 50)),
+                "memory_score": float(b.get("memory_score", 50)),
+                "emotion_score": float(b.get("emotion_score", 50)),
+                "visual_load_score": float(b.get("visual_load_score", 50)),
+            }
+        try:
+            pred = predict_creative(r, brain_scores)
+            return pred
+        except Exception as e:
+            return {"error": str(e)}
+
+    NEURO_INSIGHTS = {
+        "attention_capture": "Ad attention peaks at 0.3-0.8s; first frame determines 80% of engagement. High contrast, motion, and faces boost capture. Banner blindness reduces static ad attention by 47% after repeated exposure.",
+        "reward_processing": "Reward circuitry (ventral striatum) activates strongest for clear value propositions and discount badges. However, discount badges accelerate fatigue (Cox PH HR=1.96) — short-term CTR gain, long-term wearout cost.",
+        "memory_encoding": "Memory encoding requires 2-3s of sustained attention. Simplicity beats complexity: >5 visual elements reduces recall by 35%. Distinctive brand assets and emotional anchoring improve encoding by ~40%.",
+        "emotional_engagement": "Optimal emotional arousal: 0.6-0.8 on valence-arousal scale (inverted-U). Faces increase attention by 38% and engagement by 27%. UGC-style authenticity signals boost trust metrics.",
+        "cognitive_load": "Cognitive overload (>5 visual elements) reduces CTR by 22% and recall by 35%. Text density >0.5 correlates with higher fatigue. Clean hierarchy with dominant visual + minimal text performs best.",
+        "creative_fatigue": "Creative fatigue follows exponential decay: CTR halves every 14-21 days. Video creatives fatigue slower (half-life ~21d) vs static (~12d). Motion_score is #1 fatigue predictor (HR=5.51). Rewarded video maintains 2.1x higher sustained CTR.",
+        "color_psychology": "Warm colors (red, orange) boost urgency and CTR for limited offers. Blue/green build trust for finance/health. Purple performs well for gaming. High saturation increases attention but can increase cognitive load.",
+        "motion_dynamics": "Motion is the strongest predictor of both engagement AND fatigue. High motion_score (HR=5.51) initially captures attention but accelerates wearout. Optimal: moderate motion with variety in key frames.",
+        "face_effect": "Faces increase attention by 38% and engagement by 27% (eye-tracking research). Faces are PROTECTIVE against fatigue (HR=0.85) — they extend creative lifespan. Direct gaze outperforms averted gaze.",
+    }
+
+    tool_map = {
+        "get_creative_details": lambda args: _get_creative_details(args["creative_id"]),
+        "search_creatives": lambda args: _search_creatives(
+            status=args.get("status"), vertical=args.get("vertical"),
+            format=args.get("format"), sort_by=args.get("sort_by", "ctr"),
+            limit=args.get("limit", 5),
+        ),
+        "get_portfolio_summary": lambda args: _get_portfolio_summary(group_by=args.get("group_by")),
+        "predict_creative_outcome": lambda args: _predict_creative_outcome(args["creative_id"]),
+        "get_neuroscience_insight": lambda args: {"insight": NEURO_INSIGHTS.get(args["topic"], "No insight available for this topic.")},
+    }
 
     llm_answer = None
+    tool_calls_log = []
 
     if _openai_client:
         try:
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT[:2000] + "\n\n" + system_prompt},
-            ]
-
-            if image_base64:
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": question},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/png;base64,{image_base64}" if not image_base64.startswith("data:") else image_base64,
-                            "detail": "low",
-                        }},
-                    ],
-                })
+            messages = [{"role": "system", "content": AGENT_SYSTEM}]
+            context_hint = build_copilot_chat_prompt(question, creative) if creative else ""
+            if context_hint:
+                messages.append({"role": "user", "content": context_hint})
             else:
                 messages.append({"role": "user", "content": question})
 
-            model = LLM_MODEL
-            print(f"[copilot] Using model: {model}")
-            completion = _openai_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=500,
-                temperature=0.7,
-            )
-            llm_answer = completion.choices[0].message.content
+            for _step in range(5):
+                print(f"[copilot-agent] Step {_step + 1}, calling {LLM_MODEL}")
+                completion = _openai_client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=messages,
+                    tools=tool_schemas,
+                    tool_choice="auto",
+                    max_tokens=800,
+                    temperature=0.5,
+                )
+                choice = completion.choices[0]
+                msg = choice.message
+
+                if msg.tool_calls:
+                    messages.append(msg)
+                    for tc in msg.tool_calls:
+                        fn_name = tc.function.name
+                        fn_args = json.loads(tc.function.arguments)
+                        print(f"[copilot-agent] Tool call: {fn_name}({fn_args})")
+                        try:
+                            result = tool_map[fn_name](fn_args)
+                        except Exception as e:
+                            result = {"error": str(e)}
+                        tool_calls_log.append({"tool": fn_name, "args": fn_args, "result_keys": list(result.keys()) if isinstance(result, dict) else "list"})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(result, default=str),
+                        })
+                else:
+                    llm_answer = msg.content
+                    break
+
+            if not llm_answer:
+                llm_answer = msg.content or "I analyzed the data but couldn't form a conclusion."
+
         except Exception as e:
-            print(f"[copilot] OpenAI error: {e}")
+            print(f"[copilot-agent] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     elif _gemini_model:
         try:
-            response = _gemini_model.generate_content(
-                f"{system_prompt}\n\nUser question: {question}",
-            )
+            response = _gemini_model.generate_content(f"{AGENT_SYSTEM}\n\nContext: {build_copilot_chat_prompt(question, creative) if creative else question}")
             llm_answer = response.text
         except Exception as e:
             print(f"[copilot] Gemini error: {e}")
@@ -600,15 +874,15 @@ async def ask_copilot(request_body: dict = None):
     else:
         q_lower = question.lower()
         if "fatigu" in q_lower or "dropping" in q_lower or "falling" in q_lower or "declining" in q_lower:
-            answer = copilot_pre.get("why_fatigued", f"Creative {cid} shows fatigue probability of {fatigue_risk}%. {explanation}")
+            answer = copilot_pre.get("why_fatigued", f"Creative {cid} shows fatigue probability of {fatigue_risk}%.")
         elif "scale" in q_lower or "budget" in q_lower or "more spend" in q_lower or "pause" in q_lower:
             answer = copilot_pre.get("scale_or_pause", f"Recommended action for {cid}: {action}. Fatigue risk is {fatigue_risk}%.")
         elif "change" in q_lower or "improve" in q_lower or "next" in q_lower or "test" in q_lower:
             answer = copilot_pre.get("what_to_change", creative.get("next_best_test", "Consider refreshing the visual concept."))
         elif "brain" in q_lower or "mri" in q_lower or "cognit" in q_lower or "neural" in q_lower:
-            answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}. These are predicted cognitive response patterns derived from visual features."
+            answer = f"Brain-inspired scores for {cid}: Attention {brain.get('attention', 0):.0f}, Reward {brain.get('reward', 0):.0f}, Memory {brain.get('memory', 0):.0f}, Visual Load {brain.get('visualLoad', 0):.0f}, Emotion {brain.get('emotion', 0):.0f}."
         else:
-            answer = copilot_pre.get("summary", f"Creative {cid} is {status} with recommended action: {action}. {explanation}")
+            answer = copilot_pre.get("summary", f"Creative {cid} is {creative.get('status', 'Unknown')} with recommended action: {action}.")
 
     sentences = re.split(r'(?<=[.!?])\s+', answer)
     chunks = []
@@ -634,6 +908,7 @@ async def ask_copilot(request_body: dict = None):
             "How does this compare to the campaign average?",
         ],
         "llm_powered": llm_answer is not None,
+        "tools_used": [t["tool"] for t in tool_calls_log],
     }
 
     async def event_stream():
