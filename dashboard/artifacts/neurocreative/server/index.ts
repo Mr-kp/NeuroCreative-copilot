@@ -5,7 +5,7 @@ import analyzeUploadRouter from "./routes/analyzeUpload.js";
 import askCopilotRouter from "./routes/askCopilot.js";
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 // Middleware
 app.use(cors());

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,10 @@ import {
   CheckCircle2,
   Sparkles,
   Info,
+  Brain,
+  Zap,
+  Activity,
+  Eye,
 } from "lucide-react";
 import { analyzeCreatives } from "@/lib/apiClient";
 import type { DashboardResponse } from "@/types/dashboard";
@@ -23,16 +27,15 @@ interface UploadCampaignDataProps {
   setIsUploading: (v: boolean) => void;
 }
 
-const ACCEPTED_ASSETS = ".png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.webm";
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 const SMADEX_TABLE_HINTS = [
   { name: "creative_summary.csv", desc: "KPIs per creative (required)" },
   { name: "creatives.csv", desc: "Visual features per creative" },
-  { name: "campaigns.csv", desc: "Campaign metadata" },
-  { name: "advertisers.csv", desc: "Advertiser info" },
-  { name: "creative_daily_country_os_stats.csv", desc: "Daily time-series (for decay analysis)" },
+  { name: "creative_daily_country_os_stats.csv", desc: "Daily time-series" },
 ];
+
+const PROGRESS_ICONS = [Brain, Activity, Eye, Zap, Sparkles];
 
 export function UploadCampaignData({
   onAnalysisComplete,
@@ -45,6 +48,8 @@ export function UploadCampaignData({
   const [csvError, setCsvError] = useState<string | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [showHints, setShowHints] = useState(false);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const [isCached, setIsCached] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const assetsInputRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +88,7 @@ export function UploadCampaignData({
     setCsvFiles((prev) => prev.filter((_, i) => i !== index));
     setCsvError(null);
     setUploadSuccess(false);
+    if (csvInputRef.current) csvInputRef.current.value = "";
   };
 
   const clearAllCsvs = () => {
@@ -107,12 +113,96 @@ export function UploadCampaignData({
     setCreativeFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // ── Submit ────────────────────────────────────────────────────────────
+  // ── SSE progress for image analysis ──────────────────────────────────
+
+  const analyzeImageWithProgress = useCallback(
+    async (file: File) => {
+      setIsUploading(true);
+      setProgressMessage("Uploading creative to neural analysis engine...");
+      setIsCached(false);
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const res = await fetch("/api/analyze-creative-image", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({ error: "Unknown error" }));
+          throw new Error(body.error || `Server returned ${res.status}`);
+        }
+
+        const reader = res.body?.getReader();
+        if (!reader) throw new Error("No response stream");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalResult: DashboardResponse | null = null;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (line.startsWith("event: progress")) continue;
+            if (line.startsWith("data: ") && !line.includes("suggested_action")) {
+              try {
+                const parsed = JSON.parse(line.slice(6));
+                if (parsed.message) {
+                  setProgressMessage(parsed.message);
+                  setIsCached(parsed.cached || false);
+                }
+              } catch {}
+            }
+            if (line.startsWith("event: done")) continue;
+            if (line.startsWith("data: ") && line.includes("creatives")) {
+              try {
+                finalResult = JSON.parse(line.slice(6));
+              } catch {}
+            }
+          }
+        }
+
+        if (finalResult) {
+          setUploadSuccess(true);
+          setProgressMessage(null);
+          onAnalysisComplete(finalResult);
+        } else {
+          throw new Error("No final response received");
+        }
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : "Analysis failed unexpectedly.";
+        setProgressMessage(null);
+        onAnalysisError(message);
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [onAnalysisComplete, onAnalysisError, setIsUploading]
+  );
+
+  // ── CSV analysis ─────────────────────────────────────────────────────
 
   const handleAnalyze = async () => {
-    if (csvFiles.length === 0 || isUploading) return;
+    if (csvFiles.length === 0 && creativeFiles.length === 0) return;
+
+    // If user uploaded images but no CSVs, analyze first image with TRIBE
+    if (csvFiles.length === 0 && creativeFiles.length > 0) {
+      await analyzeImageWithProgress(creativeFiles[0]);
+      return;
+    }
+
     setIsUploading(true);
     setUploadSuccess(false);
+    setProgressMessage(null);
 
     try {
       const formData = new FormData();
@@ -135,7 +225,7 @@ export function UploadCampaignData({
     }
   };
 
-  // ── CSV drag and drop ─────────────────────────────────────────────────
+  // ── Drag and drop ────────────────────────────────────────────────────
 
   const [csvDragOver, setCsvDragOver] = useState(false);
   const [assetsDragOver, setAssetsDragOver] = useState(false);
@@ -144,9 +234,7 @@ export function UploadCampaignData({
     e.preventDefault();
     setCsvDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    const csvOnly = files.filter((f) =>
-      f.name.toLowerCase().endsWith(".csv")
-    );
+    const csvOnly = files.filter((f) => f.name.toLowerCase().endsWith(".csv"));
     if (csvOnly.length === 0) {
       setCsvError("Only .csv files are accepted.");
       return;
@@ -154,8 +242,7 @@ export function UploadCampaignData({
     setCsvError(null);
     setCsvFiles((prev) => {
       const existing = new Set(prev.map((f) => f.name));
-      const newFiles = csvOnly.filter((f) => !existing.has(f.name));
-      return [...prev, ...newFiles];
+      return [...prev, ...csvOnly.filter((f) => !existing.has(f.name))];
     });
     setUploadSuccess(false);
   }, []);
@@ -163,18 +250,58 @@ export function UploadCampaignData({
   const handleAssetsDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setAssetsDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
-    setCreativeFiles((prev) => [...prev, ...files]);
+    setCreativeFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
     setUploadSuccess(false);
   }, []);
 
-  // ── Render ────────────────────────────────────────────────────────────
+  const hasContent = csvFiles.length > 0 || creativeFiles.length > 0;
+
+  // ── Animated progress icon ───────────────────────────────────────────
+  const [iconIdx, setIconIdx] = useState(0);
+  useEffect(() => {
+    if (!progressMessage) return;
+    const t = setInterval(() => setIconIdx((i) => (i + 1) % PROGRESS_ICONS.length), 600);
+    return () => clearInterval(t);
+  }, [progressMessage]);
+
+  const ProgressIcon = PROGRESS_ICONS[iconIdx];
 
   return (
     <Card
       className="border-border/50 bg-card/40 p-5"
       data-testid="upload-campaign-data"
     >
+      {/* ── Progress Banner ──────────────────────────────────────────── */}
+      {progressMessage && (
+        <div className={`mb-4 rounded-xl border-2 p-4 flex items-center gap-3 ${
+          isCached
+            ? "border-blue-500/40 bg-blue-500/5"
+            : "border-primary/40 bg-primary/5"
+        }`}>
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary shrink-0">
+            <ProgressIcon className="h-4 w-4 animate-pulse" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-semibold mb-0.5">
+              {isCached ? "Loading cached analysis" : "Neural analysis in progress"}
+            </div>
+            <div className="text-[11px] text-muted-foreground truncate">
+              {progressMessage}
+            </div>
+          </div>
+          <div className="flex gap-0.5 shrink-0">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse"
+                style={{ animationDelay: `${i * 0.2}s` }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Header ──────────────────────────────────────────────────── */}
       <div className="flex items-center gap-2.5 mb-1">
         <Upload className="h-4 w-4 text-muted-foreground" />
         <h2 className="text-sm font-semibold">
@@ -183,12 +310,12 @@ export function UploadCampaignData({
         </h2>
       </div>
       <p className="text-[11px] text-muted-foreground mb-5 max-w-lg">
-        Upload Smadex CSV files for live pipeline analysis, or a single
-        performance CSV to match against pre-computed data.
+        Upload Smadex CSV files for pipeline analysis, or drag a creative image
+        for instant neural brain analysis.
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* ── CSV Upload (multi-file) ─────────────────────────────────── */}
+        {/* ── CSV Upload ─────────────────────────────────────────────── */}
         <div
           className={`relative rounded-xl border-2 border-dashed transition-colors p-5 ${
             csvDragOver
@@ -199,10 +326,7 @@ export function UploadCampaignData({
               ? "border-rose-500/40 bg-rose-500/5"
               : "border-border/60 bg-background/40 hover:border-border"
           }`}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setCsvDragOver(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setCsvDragOver(true); }}
           onDragLeave={() => setCsvDragOver(false)}
           onDrop={handleCsvDrop}
         >
@@ -210,13 +334,9 @@ export function UploadCampaignData({
             <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <FileSpreadsheet className="h-4.5 w-4.5" />
             </div>
-            <div className="text-xs font-semibold mb-1">
-              Upload CSV files
-            </div>
+            <div className="text-xs font-semibold mb-1">Upload CSV files</div>
             <p className="text-[10px] text-muted-foreground leading-relaxed mb-2 max-w-xs mx-auto">
-              Drag & drop or select multiple Smadex CSVs. The pipeline
-              auto-detects table types and runs brain feature extraction,
-              decay analysis, ML predictions, and recommendations.
+              Drag & drop or select multiple Smadex CSVs for live pipeline analysis.
             </p>
 
             <button
@@ -306,44 +426,42 @@ export function UploadCampaignData({
             {csvFiles.length > 0 && (
               <div className="mt-2 text-[10px] text-muted-foreground">
                 <Badge variant="outline" className="text-[9px] px-1.5 py-0 font-normal">
-                  {csvFiles.length} file{csvFiles.length !== 1 ? "s" : ""} selected
+                  {csvFiles.length} file{csvFiles.length !== 1 ? "s" : ""}
                 </Badge>
               </div>
             )}
           </div>
         </div>
 
-        {/* ── Creative Assets Upload ─────────────────────────────────── */}
+        {/* ── Creative Assets / Image Upload ─────────────────────────── */}
         <div
           className={`relative rounded-xl border-2 border-dashed transition-colors p-5 ${
             assetsDragOver
               ? "border-primary/60 bg-primary/5"
               : creativeFiles.length > 0
-              ? "border-border/60 bg-background/30"
+              ? "border-emerald-500/40 bg-emerald-500/5"
               : "border-border/60 bg-background/40 hover:border-border"
           }`}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setAssetsDragOver(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setAssetsDragOver(true); }}
           onDragLeave={() => setAssetsDragOver(false)}
           onDrop={handleAssetsDrop}
         >
           <div className="text-center">
             <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-accent/10 text-accent dark:text-[hsl(var(--accent))]">
-              <ImageIcon className="h-4.5 w-4.5" />
+              <Brain className="h-4.5 w-4.5" />
             </div>
             <div className="text-xs font-semibold mb-1">
-              Upload ad creatives
+              Upload ad creative for brain analysis
               <Badge
                 variant="outline"
-                className="ml-1.5 text-[9px] px-1.5 py-0 font-normal text-muted-foreground"
+                className="ml-1.5 text-[9px] px-1.5 py-0 font-normal text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
               >
-                Optional
+                Live
               </Badge>
             </div>
             <p className="text-[10px] text-muted-foreground leading-relaxed mb-3">
-              .png .jpg .webp .gif .mp4 .mov .webm
+              Drop an image or video. The TRIBE v2 brain model will analyze
+              attention, reward, memory, emotion, and visual load in real time.
             </p>
 
             <Button
@@ -353,13 +471,13 @@ export function UploadCampaignData({
               onClick={() => assetsInputRef.current?.click()}
             >
               <ImageIcon className="h-3 w-3" />
-              Choose files
+              {creativeFiles.length > 0 ? "Add more" : "Choose files"}
             </Button>
 
             <input
               ref={assetsInputRef}
               type="file"
-              accept={ACCEPTED_ASSETS}
+              accept=".png,.jpg,.jpeg,.webp,.gif,.mp4,.mov,.webm"
               multiple
               className="hidden"
               onChange={handleAssetsSelect}
@@ -405,15 +523,25 @@ export function UploadCampaignData({
       {/* ── Analyze button ──────────────────────────────────────────── */}
       <div className="mt-5 flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
-          {creativeFiles.length > 0 && (
+          {creativeFiles.length > 0 && csvFiles.length === 0 && (
+            <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
+              <Brain className="inline h-3 w-3 mr-1" />
+              {creativeFiles.length} creative{creativeFiles.length !== 1 ? "s" : ""} queued for brain analysis
+            </span>
+          )}
+          {creativeFiles.length > 0 && csvFiles.length > 0 && (
             <span className="text-[11px] text-muted-foreground">
               <span className="font-mono-tight font-semibold text-foreground">
                 {creativeFiles.length}
               </span>{" "}
-              asset{creativeFiles.length === 1 ? "" : "s"} selected
+              asset{creativeFiles.length === 1 ? "" : "s"} +{" "}
+              <span className="font-mono-tight font-semibold text-foreground">
+                {csvFiles.length}
+              </span>{" "}
+              CSV{csvFiles.length === 1 ? "" : "s"}
             </span>
           )}
-          {uploadSuccess && (
+          {uploadSuccess && !progressMessage && (
             <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
               <CheckCircle2 className="h-3 w-3" />
               Analysis complete
@@ -423,19 +551,28 @@ export function UploadCampaignData({
 
         <Button
           onClick={handleAnalyze}
-          disabled={csvFiles.length === 0 || isUploading}
+          disabled={(!csvFiles.length && !creativeFiles.length) || isUploading}
           className="h-9 gap-2 rounded-full px-5 text-xs font-semibold"
           data-testid="analyze-button"
         >
           {isUploading ? (
             <>
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Running pipeline…
+              {progressMessage ? "Analyzing..." : "Running pipeline..."}
             </>
           ) : (
             <>
-              <Sparkles className="h-3.5 w-3.5" />
-              Analyze creatives
+              {creativeFiles.length > 0 && csvFiles.length === 0 ? (
+                <>
+                  <Brain className="h-3.5 w-3.5" />
+                  Analyze with brain model
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Analyze creatives
+                </>
+              )}
             </>
           )}
         </Button>

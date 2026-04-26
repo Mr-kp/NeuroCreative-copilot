@@ -12,9 +12,7 @@ export function Header({ theme, toggleTheme, onAskCopilot }: HeaderProps) {
     <header className="sticky top-0 z-40 w-full border-b border-border/50 bg-background/80 backdrop-blur-xl">
       <div className="container mx-auto flex h-14 items-center justify-between px-4 lg:px-8">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Brain className="h-4 w-4" />
-          </div>
+          <img src="/logo.jpg" alt="NeuroCreative" className="h-8 w-8 rounded-lg object-cover" />
           <div className="flex items-baseline gap-2">
             <h1 className="text-sm font-semibold tracking-tight">
               NeuroCreative <span className="font-display italic font-normal text-primary">Copilot</span>

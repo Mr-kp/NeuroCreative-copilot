@@ -156,18 +156,16 @@ export function CopilotSheet({
     addMessage(userMsg);
     setInput("");
 
-    // ── Live API mode (uploaded analysis) ─────────────────────────────
-    if (isLiveMode && analyzedCreative) {
-      setIsThinking(true);
-      const thinkingMsg: ChatMessage = {
-        role: "assistant",
-        text: "",
-        timestamp: Date.now(),
-      };
-      addMessage(thinkingMsg);
+    setIsThinking(true);
+    const thinkingMsg: ChatMessage = {
+      role: "assistant",
+      text: "",
+      timestamp: Date.now(),
+    };
+    addMessage(thinkingMsg);
 
-      await askCopilotStream(
-        {
+    const payload = isLiveMode && analyzedCreative
+      ? {
           question: question.trim(),
           selectedCreative: analyzedCreative,
           dashboardContext: dashboardContext
@@ -176,64 +174,91 @@ export function CopilotSheet({
                 portfolio_recommendations: dashboardContext.portfolio_recommendations,
               }
             : undefined,
-        },
-        {
-          onToken: (text) => {
-            setMessagesByCreative((prev) => {
-              const msgs = [...(prev[creativeId] || [])];
-              const last = msgs[msgs.length - 1];
-              if (last && last.role === "assistant") {
-                msgs[msgs.length - 1] = { ...last, text: last.text + text };
-              }
-              return { ...prev, [creativeId]: msgs };
-            });
-          },
-          onDone: (response) => {
-            setMessagesByCreative((prev) => {
-              const msgs = [...(prev[creativeId] || [])];
-              const last = msgs[msgs.length - 1];
-              if (last && last.role === "assistant") {
-                msgs[msgs.length - 1] = {
-                  ...last,
-                  text: response.answer || last.text,
-                  suggestedAction: response.suggested_action,
-                  confidence: response.confidence ? Math.round(response.confidence * 100) : undefined,
-                  supportingPoints: response.supporting_points,
-                  followUpQuestions: response.follow_up_questions,
-                };
-              }
-              return { ...prev, [creativeId]: msgs };
-            });
-            setIsThinking(false);
-          },
-          onError: (error) => {
-            setMessagesByCreative((prev) => {
-              const msgs = [...(prev[creativeId] || [])];
-              const last = msgs[msgs.length - 1];
-              if (last && last.role === "assistant") {
-                msgs[msgs.length - 1] = {
-                  ...last,
-                  text: last.text || `Copilot failed: ${error}`,
-                  isError: true,
-                };
-              }
-              return { ...prev, [creativeId]: msgs };
-            });
-            setIsThinking(false);
-          },
         }
-      );
-      return;
-    }
+      : {
+          question: question.trim(),
+          selectedCreative: {
+            creative_id: creative.id,
+            status: creative.status,
+            recommended_action: creative.action,
+            fatigue_risk: creative.fatigueRisk,
+            creative_health_score: creative.healthScore,
+            ctr: creative.ctr,
+            cvr: creative.cvr,
+            roas: creative.roas,
+            spend: creative.spend,
+            impressions: creative.impressions,
+            brain_scores: {
+              attention: creative.brainScores.attention,
+              reward: creative.brainScores.engagement,
+              memory: creative.brainScores.recall,
+              visualLoad: creative.brainScores.cognitiveLoad,
+              emotion: creative.brainScores.noveltyResponse,
+            },
+            explanation: creative.recommendation.headline,
+            key_reasons: creative.recommendation.reasons.map((r) => r.text),
+            next_best_test: creative.recommendation.nextBestTest,
+            copilot_answers: {},
+          },
+        };
 
-    // ── Fallback local mode (demo data) ───────────────────────────────
-    const answer = generateLocalAnswer(question, creative);
-    const botMsg: ChatMessage = {
-      role: "assistant",
-      text: answer,
-      timestamp: Date.now(),
-    };
-    addMessage(botMsg);
+    try {
+      await askCopilotStream(payload, {
+        onToken: (text) => {
+          setMessagesByCreative((prev) => {
+            const msgs = [...(prev[creativeId] || [])];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = { ...last, text: last.text + text };
+            }
+            return { ...prev, [creativeId]: msgs };
+          });
+        },
+        onDone: (response) => {
+          setMessagesByCreative((prev) => {
+            const msgs = [...(prev[creativeId] || [])];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = {
+                ...last,
+                text: response.answer || last.text,
+                suggestedAction: response.suggested_action,
+                confidence: response.confidence ? Math.round(response.confidence * 100) : undefined,
+                supportingPoints: response.supporting_points,
+                followUpQuestions: response.follow_up_questions,
+              };
+            }
+            return { ...prev, [creativeId]: msgs };
+          });
+          setIsThinking(false);
+        },
+        onError: (err) => {
+          console.warn("[CopilotSheet] API error, falling back to local answer:", err);
+          const answer = generateLocalAnswer(question, creative);
+          setMessagesByCreative((prev) => {
+            const msgs = [...(prev[creativeId] || [])];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = { ...last, text: answer, isError: true };
+            }
+            return { ...prev, [creativeId]: msgs };
+          });
+          setIsThinking(false);
+        },
+      });
+    } catch (err) {
+      console.warn("[CopilotSheet] Exception, falling back to local answer:", err);
+      const answer = generateLocalAnswer(question, creative);
+      setMessagesByCreative((prev) => {
+        const msgs = [...(prev[creativeId] || [])];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant") {
+          msgs[msgs.length - 1] = { ...last, text: answer, isError: true };
+        }
+        return { ...prev, [creativeId]: msgs };
+      });
+      setIsThinking(false);
+    }
   };
 
   return (
@@ -345,6 +370,12 @@ export function CopilotSheet({
                     <p className="text-[13px] leading-relaxed text-foreground/90">
                       {m.text}
                     </p>
+
+                    {m.isError && (
+                      <p className="mt-1 text-[10px] text-muted-foreground/60 italic">
+                        Offline fallback — API unavailable
+                      </p>
+                    )}
 
                     {/* Structured response extras */}
                     {m.role === "assistant" && !m.isError && m.suggestedAction && m.suggestedAction !== "None" && (

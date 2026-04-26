@@ -285,3 +285,10 @@
     80%, 100% { transform: scale(2); opacity: 0; }
   }
 }
+
+@media print {
+  body { background: white !important; color: black !important; background-image: none !important; }
+  [class*="bg-gradient"] { background: white !important; }
+  .dark body { background: white !important; color: black !important; }
+  * { color-adjust: exact; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}

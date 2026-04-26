@@ -21,7 +21,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    host: "localhost",
+    host: true,
+    allowedHosts: true,
     proxy: {
       "/api": {
         target: "http://localhost:8000",
@@ -32,6 +33,10 @@ export default defineConfig({
         changeOrigin: true,
       },
       "/assets": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/tmp-uploads": {
         target: "http://localhost:8000",
         changeOrigin: true,
       },

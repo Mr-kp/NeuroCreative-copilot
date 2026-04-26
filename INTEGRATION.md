@@ -21,17 +21,36 @@ NeuroCreative Copilot is a hackathon project for the **Smadex Creative Intellige
 
 ```
 NeuroCreative-copilot/
-  api_server.py              # FastAPI backend — upload, copilot SSE, asset serving
+  api_server.py              # FastAPI backend — upload, copilot SSE, image analysis, asset serving
   pipeline_runner.py         # Live pipeline — detect, join, brain, decay, ML, recommend
+  copilot_agent.py           # Copilot agent — 4 tools, executive summary, heatmap, multi-LLM
+  copilot_prompts.py         # System prompt + neuroscience knowledge base + context builders
+  tribe_client.py            # Remote TRIBE V2 client (Kaggle GPU via cloudflared)
+  cache_manager.py           # Hash-based JSON cache with numpy serialization
+  pipeline_logger.py         # Structured rotating log (logs/pipeline.log)
   CHANGELOG.md               # Detailed change history
   INTEGRATION.md             # This file
   README.md                  # Project overview and quick start
-  .gitignore
-  data/                      # Pre-computed pipeline outputs (fallback data)
+  .env.example               # API keys (OPENAI, GOOGLE, TRIBE_ENDPOINT)
+  tribe_colab_backend.ipynb  # Kaggle-ready TRIBE V2 inference notebook
+  data/                      # Pre-computed pipeline outputs (TRIBE V2 integrated)
     master_creatives.csv     # 1080 creatives with full metadata + KPIs
-    model_outputs.csv        # predicted_status, fatigue_probability, recommendation, explanation
-    brain_features.csv       # attention, reward, memory, emotion, visual_load scores
+    model_outputs.csv        # v3 boosted: predicted_status, fatigue_probability, recommendation
+    brain_features.csv       # TRIBE V2 integrated: 75 real + 1005 imputed brain scores
+    ml_predictions.csv       # v3 boosted ML predictions with perf_score_predicted
+    neural_cache_top_bottom.csv # 75 real TRIBE V2 scores (25 top + 25 avg + 25 bottom)
     daily_fatigue_table.csv  # 52350 daily rows with CTR/CVR/ROAS time series
+  models/                    # Trained LightGBM v3 boosted models (77 features)
+    status_classifier.pkl    # LGBMClassifier (4-class, 76.4% accuracy)
+    fatigue_regressor.pkl    # LGBMRegressor for fatigue probability
+    perf_regressor.pkl       # LGBMRegressor for performance score
+    label_encoders.pkl       # 13 LabelEncoder objects for categoricals
+    model_metadata.pkl       # Feature names + metadata
+  assets/                    # Creative images (apple_ad.png, nike_ad.png, etc.)
+  tmp/cache/                 # Hash-based analysis cache (auto-created)
+  tmp/copilot/               # Copilot analysis cache (JSON, keyed by file hash)
+  tmp/uploads/               # Copilot uploaded files (static mount /tmp-uploads/)
+  logs/                      # Rotating pipeline logs (auto-created)
   pipeline/                  # All backend scripts (offline, re-runnable)
     creative_intelligence/   # Original 7-step pipeline scripts
       data_pipeline.py       # Step 1: join Smadex CSVs into master table
@@ -54,12 +73,19 @@ NeuroCreative-copilot/
       neurocreative/         # React/Vite frontend dashboard
         src/
           components/        # UI components (shadcn/ui based)
-            UploadCampaignData.tsx  # Multi-file CSV upload with auto-detection
-            CopilotSheet.tsx        # SSE streaming copilot chat
+            UploadCampaignData.tsx  # Multi-file CSV + image upload with SSE progress
+            CopilotSheet.tsx        # SSE streaming copilot chat (dashboard context)
             BrainActivityMRI.tsx    # MRI-style heatmap visualization
-          data/smadexData.ts # Demo data (fallback when no CSV uploaded)
-          lib/apiClient.ts   # API client (multi-file upload + SSE streaming copilot)
-          types/dashboard.ts # TypeScript interfaces
+            copilot/                # Full copilot page components
+              CopilotPage.tsx       # Full-page copilot: upload, progress, report, reset, PDF
+              CopilotReport.tsx     # Grade card, brain gauges, decay chart, heatmap, improvements
+              CopilotChat.tsx       # Agent chat with tool calling, suggestion chips
+          lib/
+            apiClient.ts           # API client (multi-file upload + SSE streaming)
+            copilotApi.ts          # Copilot API: copilotAnalyze, copilotChat, copilotCompare, copilotReset
+          types/
+            dashboard.ts           # TypeScript interfaces (dashboard)
+            copilot.ts             # TypeScript interfaces (CopilotAnalysis, ChatMessage, etc.)
         server/              # Original Express server (replaced by api_server.py)
         vite.config.ts       # Proxy /api -> localhost:8000
     lib/
@@ -87,20 +113,91 @@ When the user uploads raw Smadex CSV files, the backend runs the full pipeline l
   │ advertisers       │     │  2. build_master()      │────>│                  │
   │ daily_stats       │     │  3. build_daily()       │     │ KPI cards, brain  │
   └──────────────────┘     │  4. brain_features()    │     │ scores, gallery,  │
-                           │  5. decay_features()    │     │ recommendations   │
-                           │  6. predictions_ml()    │     │                  │
-                           │  7. recommendations()   │     │                  │
-                           │                         │     │                  │
-                           │ api_server.py            │     │                  │
-                           │  build_creative_row()   │     │                  │
-                           │  build_dashboard_summary│     │                  │
-                           └─────────────────────────┘     └──────────────────┘
+                            │  5. decay_features()    │     │ recommendations   │
+                            │  6. predictions_ml()    │     │                  │
+                            │  7. recommendations()   │     │                  │
+                            │                         │     │                  │
+                            │ api_server.py            │     │                  │
+                            │  build_creative_row()   │     │                  │
+                            │  build_dashboard_summary│     │                  │
+                            └─────────────────────────┘     └──────────────────┘
 
   User asks copilot    ┌─────────────────────────┐
   ┌──────────────────┐ │ POST /api/ask-copilot   │     CopilotSheet
   │ "Why is this     │>│ Rule-based answers      │────> streams tokens
   │ ad fatigued?"    │ │ from pipeline data      │     live, word by word
   └──────────────────┘ └─────────────────────────┘
+```
+
+### Image Analysis Mode (TRIBE V2 + LightGBM V3)
+
+When the user uploads a creative image (PNG/JPG), the backend runs TRIBE V2 brain inference + trained ML models:
+
+```
+  User uploads image       Python Backend                         React Frontend
+  ┌──────────────────┐     ┌──────────────────────────────┐     ┌──────────────────┐
+  │ apple_ad.png      │     │ POST /api/analyze-creative-   │     │                  │
+  │ (471 KB PNG)      │────>│          image (SSE stream)   │────>│ Progress banner   │
+  └──────────────────┘     │                              │     │ with step icons,  │
+                             │ 1. Hash → cache check        │     │ then result card  │
+                             │ 2. extract_pil_features()    │     │                  │
+                             │    → 19 PIL features         │     │ brain scores,     │
+                             │ 3. TRIBE V2 (Kaggle P100)    │     │ fatigue %, rec    │
+                             │    → 5 brain scores          │     │                  │
+                             │ 4. predict_creative()        │     └──────────────────┘
+                             │    → 77-feature vector       │
+                             │    → LightGBM v3 boosted     │
+                             │    → status + fatigue + perf │
+                             │ 5. Cache result              │
+                             └──────────────────────────────┘
+```
+
+### Creative Intelligence Copilot (Full Analysis + Agent Chat)
+
+Dedicated `/copilot` page with full analysis pipeline, interactive agent chat, and comparison:
+
+```
+  User drops creative     Python Backend                              React Frontend
+  ┌──────────────────┐    ┌────────────────────────────────┐    ┌──────────────────────┐
+  │ any image/video   │    │ POST /api/copilot/analyze      │    │                      │
+  │                   │───>│ SSE: 7 progress steps w/timing │───>│ CopilotPage           │
+  └──────────────────┘    │                                │    │  ├─ drop zone          │
+                          │ Step 1: PIL features (19)      │    │  ├─ progress steps     │
+                          │ Step 2: TRIBE V2 brain (5)     │    │  └─ CopilotReport      │
+                          │ Step 3: LightGBM v3 (77 feat)  │    │     ├─ grade card (A-F) │
+                          │ Step 4: Recommendation         │    │     ├─ brain gauges     │
+                          │ Step 5: Decay + summary + impr.│    │     ├─ decay chart      │
+                          │ Step 6: Heatmap (8x8)          │    │     ├─ heatmap          │
+                          │ Step 7: Final report → cache   │    │     ├─ improvements     │
+                          │                                │    │     └─ ML recommendation │
+  User asks question     │ POST /api/copilot/chat          │    │                      │
+  ┌──────────────────┐    │                                │    │ CopilotChat           │
+  │ "How can I       │───>│ CopilotAgent (4 tools):        │───>│  ├─ tool call badges   │
+  │ improve this?"   │    │  forecast_decay                │    │  ├─ streaming text     │
+  └──────────────────┘    │  explain_brain_scores          │    │  └─ suggestion chips   │
+                          │  suggest_improvements          │    │                      │
+                          │  compare_creatives             │    │                      │
+                          │ LLM: GPT-4o → Gemini → rules   │    │                      │
+                          └────────────────────────────────┘    └──────────────────────┘
+```
+
+### TRIBE V2 Remote Inference
+
+TRIBE V2 runs on a Kaggle P100 GPU, exposed via cloudflared tunnel:
+
+```
+  api_server.py              cloudflared tunnel              Kaggle P100
+  ┌──────────────┐           ┌──────────────┐              ┌──────────────┐
+  │ tribe_client  │──HTTP───>│ trycloudflare │─────────────>│ TRIBE V2     │
+  │ .call_tribe() │          │ .com/api/     │              │ model on GPU │
+  │               │<─────────│ analyze       │<─────────────│              │
+  │ Returns:      │           └──────────────┘              │ attention:   │
+  │ attention,    │                                         │ reward,      │
+  │ reward,       │           tribe_colab_backend.ipynb     │ memory,      │
+  │ memory,       │           runs the TRIBE server +       │ emotion,     │
+  │ emotion,      │           cloudflared tunnel            │ visualLoad   │
+  │ visualLoad    │                                         └──────────────┘
+  └──────────────┘
 ```
 
 ### Pre-computed Match Mode (fallback)
@@ -167,8 +264,19 @@ All joins are LEFT joins from the spine, so no creatives are lost.
 
 ### Brain Feature Formulas
 
-When TRIBE v2 is not available (the default — it requires a GPU), brain scores are computed from visual metadata:
+Brain scores come from two sources:
 
+**TRIBE V2 (real neural model, 75 creatives):**
+- Actual brain encoding model running on Kaggle P100 GPU
+- Processes creative image/video → outputs attention, reward, memory, emotion, visualLoad
+- Source: `tribe_v2` in `brain_score_source` field
+
+**LightGBM-imputed (1005 creatives):**
+- Trained on the 75 real TRIBE V2 scores to predict brain scores for remaining creatives
+- Uses 77 features (visual metadata + campaign + PIL + interactions)
+- Source: `imputed` in `brain_score_source` field
+
+**Heuristic fallback (pipeline_runner.py, no GPU needed):**
 - **Attention** = 0.40 x motion_score + 0.30 x novelty_score + 0.20 x clutter_score + 0.10 x (duration_sec > 0)
 - **Reward** = 0.30 x brand_visibility + 0.25 x has_discount + 0.25 x has_price + 0.20 x (product_count / max_product_count)
 - **Memory** = 0.35 x readability + 0.25 x (1 - text_density) + 0.25 x brand_visibility + 0.15 x novelty
@@ -186,6 +294,20 @@ For each creative with daily time-series data:
 3. **No daily data**: Derives decay from master table's `ctr_decay_pct` column
 
 ### ML Predictions
+
+#### Trained Models (v3 Boosted, 77 features)
+
+When the trained models in `models/` are available (loaded via joblib):
+
+1. **Status Classifier** (`status_classifier.pkl`, LGBMClassifier): 4-class prediction — top_performer, stable, fatigued, underperformer. **76.4% accuracy**.
+2. **Fatigue Regressor** (`fatigue_regressor.pkl`, LGBMRegressor): Continuous fatigue probability (0-1).
+3. **Performance Regressor** (`perf_regressor.pkl`, LGBMRegressor): Performance score (0-100).
+
+**77 features**: creative design (text_density, clutter_score, motion_score...), campaign (daily_budget_usd, objective, is_video), 13 encoded categoricals (vertical, format, tone, theme, platform, etc.), binary attributes (has_discount, has_price, is_video...), TRIBE V2 brain scores (*_real), 17 PIL image features (brightness, contrast, saturation, edge density...), 10 country flags, 12 interaction features.
+
+**Neural efficiency finding**: Lower brain activation correlates with better performance (r = -0.24 to -0.27). Top performers average ~36/100 neural activation, underperformers ~50/100.
+
+#### Live Pipeline (per-upload)
 
 When lightgbm + sklearn are available and `creative_status` labels exist:
 
@@ -228,8 +350,23 @@ Applied to each creative in order of priority:
 - **Response includes**:
   - `dashboard_summary`: Aggregate KPIs (spend, impressions, CTR, CVR, ROAS, fatigued count)
   - `creatives[]`: Array of 1080 creative objects with all scores and recommendations
+  - Each creative has `brain_score_source` (`tribe_v2` | `imputed`) and `_ml_source`
   - `portfolio_recommendations[]`: Top-level action items for the portfolio
   - `pipeline_log[]`: Step-by-step log of what the pipeline did (live mode only)
+
+### `POST /api/analyze-creative-image`
+- **Input**: Multipart form with `file` (PNG/JPG image)
+- **Output**: SSE stream
+- **Progress events** (7 steps): PIL features, TRIBE brain scores, ML prediction, fatigue analysis, etc.
+- **Done event**: Full creative analysis result
+- **Caching**: Results cached in `tmp/cache/` by file hash. Cached results show 5-second progress animation then return instantly.
+- **Pipeline**: `extract_pil_features()` → `tribe_client.call_tribe()` → `predict_creative()` → recommendation
+
+### `POST /api/analyze-creative-v2`
+- **Input**: Multipart form with `file` (image) + optional `context` (JSON string)
+- **Output**: SSE stream
+- **Full 77-feature ML analysis** + optional GPT-4o multimodal vision analysis
+- **Steps**: PIL features → TRIBE brain → LightGBM v3 boosted → GPT-4o vision → recommendation
 
 ### `POST /api/ask-copilot`
 - **Input**: JSON `{ question: string, selectedCreative: object, dashboardContext?: object }`
@@ -241,6 +378,46 @@ Applied to each creative in order of priority:
   2. **Google Gemini 2.0 Flash**: Used when `GOOGLE_API_KEY` is set and no OpenAI key. Same prompt structure.
   3. **Rule-based**: Keyword matching (fatigue, scale, change, brain) against pre-computed copilot answers. Always available.
 - **System prompt includes**: creative ID, status, recommended action, fatigue risk, CTR/CVR/ROAS, brain scores, explanation
+
+### `POST /api/copilot/analyze`
+- **Input**: Multipart form with `file` (image or video)
+- **Output**: SSE stream
+- **Progress events** (7 steps with real timing):
+  1. PIL feature extraction (19 features)
+  2. TRIBE V2 brain scores (or mock fallback)
+  3. LightGBM v3 boosted prediction (77 features)
+  4. Recommendation generation
+  5. Decay forecast + executive summary + improvement suggestions
+  6. Attention heatmap (8x8 grid)
+  7. Final report assembly
+- **Done event**: Full `CopilotAnalysis` JSON
+- **Caching**: Results cached in `tmp/copilot/{hash}.json` by file SHA-256. Cached results return as SSE stream.
+- **Error handling**: Entire stream wrapped in try/except; errors sent as `event: error` with message
+- **Response includes**: `is_mock_data` (bool), `total_processing_time` (seconds), `step_timings` (dict), `brain_score_source`
+
+### `POST /api/copilot/chat`
+- **Input**: JSON `{ message: string, analysis_ids: string[], history: ChatMessage[] }`
+- **Output**: SSE stream
+  - `thinking` events when agent is reasoning
+  - `tool_call` events with `{ name, label }` when agent invokes a tool
+  - `tool_result` events with `{ name, summary }` after tool execution
+  - `token` events with `{ text }` chunks for the response
+  - `done` event with `{ provider }` label
+- **Agent tools**:
+  1. `forecast_decay` — scipy exponential CTR decay with half-life, fatigue onset, critical day
+  2. `explain_brain_scores` — Neuroscience benchmark explanations with population comparisons
+  3. `suggest_improvements` — Priority-ranked improvement suggestions with current→target scores
+  4. `compare_creatives` — Side-by-side comparison across all dimensions
+- **LLM resolution**: OpenAI GPT-4o (function calling, 3 rounds) → Gemini 2.5 Flash → rule-based
+
+### `POST /api/copilot/compare`
+- **Input**: JSON `{ analysis_ids: string[] }` (minimum 2)
+- **Output**: JSON `ComparisonResult` with winner, insights, dimension-by-dimension breakdown
+
+### `POST /api/copilot/reset`
+- **Input**: None
+- **Output**: JSON `{ ok: bool, cleared_cache: int, cleared_uploads: int }`
+- **Logic**: Deletes all `tmp/copilot/*.json` and `tmp/uploads/*` files
 
 ### `GET /assets/{filename}`
 - Serves PNG creative images from local `assets/` directory
@@ -263,6 +440,9 @@ Applied to each creative in order of priority:
 | `BrainIntelligencePanel` | Brain score gauges (attention, reward, memory, etc.) |
 | `BrainActivityMRI` | MRI-style heatmap visualization |
 | `CopilotSheet` | Slide-out chat panel with SSE streaming responses |
+| **`CopilotPage`** | Full-page copilot: drag-drop zone, SSE progress with step checkmarks, multi-creative tabs, PDF export, reset |
+| **`CopilotReport`** | Executive summary (A-F grade), brain score gauges, decay forecast chart, attention heatmap, improvements, ML recommendation |
+| **`CopilotChat`** | Agent chat with SSE streaming, tool call indicators, suggestion chips, upload-another |
 
 ---
 
@@ -395,6 +575,13 @@ python-dotenv        # Load .env file (has manual fallback if not installed)
 scipy          # Decay curve fitting (fallback: linear heuristic)
 scikit-learn   # ML preprocessing (fallback: rule-based)
 lightgbm       # Status classifier + fatigue regressor (fallback: heuristic)
+joblib         # Model loading (comes with scikit-learn)
+Pillow         # PIL image feature extraction for image uploads
+```
+
+### Python (TRIBE V2 client — optional with fallback)
+```
+httpx          # Async HTTP client for TRIBE V2 endpoint (fallback: requests)
 ```
 
 ### Python (offline pipeline scripts only)
@@ -434,7 +621,15 @@ Rule-based keyword matching (always works, no API key needed)
 
 All paths stream via SSE. The system prompt includes full creative context: status, metrics, brain scores, explanation. Response includes `llm_powered: true/false`.
 
-### ML Predictions (in `pipeline_runner.py`)
+### ML Predictions (trained models, v3 boosted)
+
+| Model | File | Type | Features | Accuracy |
+|-------|------|------|----------|----------|
+| Status Classifier | `models/status_classifier.pkl` | LGBMClassifier (4-class) | 77 | 76.4% |
+| Fatigue Regressor | `models/fatigue_regressor.pkl` | LGBMRegressor | 77 | Continuous 0-1 |
+| Perf Regressor | `models/perf_regressor.pkl` | LGBMRegressor | 77 | Continuous 0-100 |
+
+### ML Predictions (live pipeline, per-upload)
 
 | Model | Type | Classes/Output | Training |
 |-------|------|----------------|----------|
@@ -442,9 +637,13 @@ All paths stream via SSE. The system prompt includes full creative context: stat
 | LightGBM Regressor | Gradient boosting | Continuous fatigue probability (0-1) | Same train/test split as classifier |
 | Heuristic fallback | Rule-based formula | Status + fatigue from CTR decay, ROAS, decay rate | No training needed |
 
-### Brain Scores (in `pipeline_runner.py`)
+### Brain Scores (three sources)
 
-Custom weighted formulas computing 5 neuro-inspired scores from visual metadata. Pure numpy, always works. See Brain Feature Formulas section below.
+| Source | When | How | Response field |
+|--------|------|-----|----------------|
+| **TRIBE V2** (real) | Image upload + 75 pre-computed creatives | Neural encoding model on Kaggle P100 GPU | `brain_score_source: "tribe_v2"` |
+| **LightGBM-imputed** | 1005 pre-computed creatives | Trained on 75 real TRIBE scores, predicts for rest | `brain_score_source: "imputed"` |
+| **Heuristic formulas** | Live pipeline, no GPU | Weighted metadata formulas (pure numpy) | Not tracked (always works) |
 
 ### Decay Curves (in `pipeline_runner.py`)
 
@@ -460,13 +659,18 @@ Custom weighted formulas computing 5 neuro-inspired scores from visual metadata.
 
 | What | Before | After |
 |------|--------|-------|
-| Backend | Express + OpenAI API | FastAPI + live pipeline + pre-computed fallback |
-| Data source | OpenAI generates analysis | Pipeline runs live on uploaded CSVs |
+| Backend | Express + OpenAI API | FastAPI + live pipeline + pre-computed fallback + TRIBE V2 |
+| Data source | OpenAI generates analysis | Pipeline runs live on uploaded CSVs; TRIBE V2 brain model for images |
 | Copilot | OpenAI chat completions (required) | GPT-4o-mini / Gemini 2.0 Flash / rule-based (all optional) |
-| Upload | Single CSV, match against pre-computed | Multi-file CSV, auto-detect + live pipeline |
-| Frontend upload | Single file picker | Multi-file drag-and-drop with auto-detection |
-| API client | Single JSON fetch | Multi-file upload + SSE streaming |
+| Upload | Single CSV, match against pre-computed | Multi-file CSV + image upload with SSE progress streaming |
+| Frontend upload | Single file picker | Multi-file drag-and-drop with auto-detection + image analysis |
+| API client | Single JSON fetch | Multi-file upload + SSE streaming + image upload |
 | Vite proxy | `localhost:3001` (Express) | `localhost:8000` (FastAPI) + `/creatives` + `/assets` |
 | Asset serving | External Smadex dataset dir | Local `assets/` directory + embedded dataset fallback |
 | Creative IDs | Numeric only (500000) | Numeric + string (APPLE-01, CR-1042) |
 | Pipeline scripts | Outside repo, offline only | Integrated in `pipeline_runner.py` + `pipeline/` |
+| Brain scores | Heuristic formulas only | TRIBE V2 real neural model (75) + LightGBM imputed (1005) + heuristic fallback |
+| ML models | Per-upload LightGBM training | Pre-trained v3 boosted models (77 features, 76.4% accuracy) |
+| Image analysis | Not supported | PIL features → TRIBE V2 → LightGBM v3 → recommendation (SSE streaming) |
+| Caching | None | Hash-based JSON cache in `tmp/cache/` with numpy serialization |
+| Logging | Print statements | Structured rotating log (`logs/pipeline.log`, 5MB rotation) |

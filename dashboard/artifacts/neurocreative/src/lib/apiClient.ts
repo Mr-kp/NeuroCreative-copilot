@@ -57,6 +57,7 @@ export async function askCopilotStream(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: "Unknown error" }));
+    console.error("[askCopilot] Server error:", res.status, body);
     callbacks.onError(body.error || `Server returned ${res.status}`);
     return;
   }
@@ -90,7 +91,9 @@ export async function askCopilotStream(
           if (parsed.text) {
             callbacks.onToken(parsed.text);
           }
-        } catch {}
+        } catch (e) {
+          console.warn("[askCopilot] Failed to parse SSE token data:", raw, e);
+        }
       }
       if (line.startsWith("event: done")) {
         continue;
@@ -98,14 +101,18 @@ export async function askCopilotStream(
       if (line.startsWith("data: ") && line.includes("suggested_action")) {
         try {
           finalResponse = JSON.parse(line.slice(6));
-        } catch {}
+        } catch (e) {
+          console.warn("[askCopilot] Failed to parse SSE final response:", line, e);
+        }
       }
     }
   }
 
   if (finalResponse) {
+    console.log("[askCopilot] Stream complete, response received");
     callbacks.onDone(finalResponse);
   } else {
+    console.error("[askCopilot] No final response received from SSE stream");
     callbacks.onError("No final response received");
   }
 }
